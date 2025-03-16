@@ -13,6 +13,8 @@ import PyQt5.QtWidgets as QtWidgets
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from RoadNetwork import RoadNetwork
 from SocialNetwork import SocialNetwork
+from BitVectorCommunityDetector import BitVectorCommunityDetector
+from CommunityBridge import CommunityBridge
 from sklearn.cluster import KMeans
 from pyvis.network import Network
 import networkx as nx
@@ -20,7 +22,6 @@ import time
 from gui.menubar import MenuBar
 from gui.queryInput import QueryInput
 from gui.user import UserUI
-#from gui.toolbar import Mixin as ToolbarMixin
 from gui.toolbar import Toolbar, QueryToolbar, Timeline
 from gui.tree import Mixin as TreeMixin
 import datetime
@@ -110,6 +111,16 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
 
         self.communityUserPos = {}
         self.previousUsers = []
+        
+        # Initialize community detector
+        self.communityDetector = None
+        self.precomputed = False
+        
+        # Initialize community bridge for original functionality
+        self.community_bridge = CommunityBridge(self)
+        
+        # Storage for community results
+        self.current_communities = []
 
 
     # Creates the plot widgets. suffix is used when a summary graph is created, for example
@@ -154,7 +165,669 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         # Show window
         self.show()
     
+    def initializeCommunityDetector(self):
+        """Initialize or update the community detector with current networks"""
+        if self.selectedSocialNetwork and self.selectedRoadNetwork:
+            self.communityDetector = BitVectorCommunityDetector(
+                self.selectedSocialNetwork, 
+                self.selectedRoadNetwork
+            )
+            self.precomputed = False
+            return True
+        return False
+
+    def __bitvectorCommunitySearch(self):
+        """Open dialog for community search with bit vector optimization"""
+        # Check if a query user is selected
+        if self.queryUser is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Query User Required",
+                "Please select a query user first."
+            )
+            return
+            
+        # Create dialog if it doesn't exist
+        if not hasattr(self, 'bitvectorDialog') or self.__windows.get(9) is None:
+            self.__windows[9] = QtWidgets.QDialog(self)
+            self.__windows[9].setWindowTitle("BitVector Community Search")
+            self.__windows[9].setWindowModality(QtCore.Qt.ApplicationModal)
+            self.__windows[9].resize(400, 350)
+            
+            # Main layout
+            layout = QtWidgets.QVBoxLayout(self.__windows[9])
+            
+            # Form layout for inputs
+            form = QtWidgets.QFormLayout()
+            
+            # Query user information display
+            self.__windows[9].queryUserLabel = QtWidgets.QLabel(f"Query User: {self.queryUser[0]}")
+            self.__windows[9].queryUserLabel.setStyleSheet("font-weight: bold;")
+            form.addRow(self.__windows[9].queryUserLabel)
+            
+            # Keywords display (read-only)
+            query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
+            keywords_text = ", ".join([self.selectedSocialNetwork.getKeywordByID(k) for k in query_keywords])
+            
+            self.__windows[9].keywordsDisplay = QtWidgets.QTextEdit()
+            self.__windows[9].keywordsDisplay.setText(keywords_text)
+            self.__windows[9].keywordsDisplay.setReadOnly(True)
+            self.__windows[9].keywordsDisplay.setMaximumHeight(60)
+            form.addRow("Keywords:", self.__windows[9].keywordsDisplay)
+            
+            # Top-K communities input
+            self.__windows[9].topKInput = QtWidgets.QSpinBox()
+            self.__windows[9].topKInput.setRange(1, 20)
+            self.__windows[9].topKInput.setValue(5)
+            form.addRow("Number of Communities (K):", self.__windows[9].topKInput)
+            
+            # Radius selection
+            self.__windows[9].radiusCombo = QtWidgets.QComboBox()
+            self.__windows[9].radiusCombo.addItems(["1", "2"])
+            self.__windows[9].radiusCombo.setCurrentIndex(1)  # Default to r=2
+            form.addRow("Radius (r):", self.__windows[9].radiusCombo)
+            
+            # Minimum similarity
+            self.__windows[9].minSimInput = QtWidgets.QDoubleSpinBox()
+            self.__windows[9].minSimInput.setRange(0.01, 0.5)
+            self.__windows[9].minSimInput.setSingleStep(0.01)
+            self.__windows[9].minSimInput.setValue(0.01)
+            form.addRow("Minimum Similarity:", self.__windows[9].minSimInput)
+            
+            # Precomputation
+            precompFrame = QtWidgets.QHBoxLayout()
+            self.__windows[9].precompCheck = QtWidgets.QCheckBox("Use Precomputation")
+            self.__windows[9].precompCheck.setChecked(self.precomputed)
+            self.__windows[9].precompBtn = QtWidgets.QPushButton("Precompute Now")
+            self.__windows[9].precompBtn.clicked.connect(self.precomputeSubgraphs)
+            precompFrame.addWidget(self.__windows[9].precompCheck)
+            precompFrame.addWidget(self.__windows[9].precompBtn)
+            form.addRow("Precomputation:", precompFrame)
+            
+            # Status label
+            self.__windows[9].statusLabel = QtWidgets.QLabel("Ready")
+            self.__windows[9].statusLabel.setAlignment(QtCore.Qt.AlignCenter)
+            
+            # Buttons
+            buttonBox = QtWidgets.QHBoxLayout()
+            self.__windows[9].searchBtn = QtWidgets.QPushButton("Find Communities")
+            self.__windows[9].searchBtn.clicked.connect(self.findCommunities)
+            self.__windows[9].cancelBtn = QtWidgets.QPushButton("Cancel")
+            self.__windows[9].cancelBtn.clicked.connect(self.__windows[9].reject)
+            buttonBox.addWidget(self.__windows[9].searchBtn)
+            buttonBox.addWidget(self.__windows[9].cancelBtn)
+            
+            # Add to main layout
+            layout.addLayout(form)
+            layout.addWidget(self.__windows[9].statusLabel)
+            layout.addLayout(buttonBox)
+        else:
+            # Update query user and keywords info if dialog already exists
+            self.__windows[9].queryUserLabel.setText(f"Query User: {self.queryUser[0]}")
+            
+            query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
+            keywords_text = ", ".join([self.selectedSocialNetwork.getKeywordByID(k) for k in query_keywords])
+            self.__windows[9].keywordsDisplay.setText(keywords_text)
         
+        # Update precomputation checkbox state
+        self.__windows[9].precompCheck.setChecked(self.precomputed)
+        
+        # Check if networks are available
+        if not self.selectedSocialNetwork or not self.selectedRoadNetwork:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Networks Required",
+                "Both social and road networks must be selected."
+            )
+            return
+        
+        # Initialize detector if needed
+        if not self.communityDetector:
+            self.initializeCommunityDetector()
+        
+        # Show dialog
+        self.__windows[9].show()
+
+    def precomputeSubgraphs(self):
+        """Precompute subgraphs for faster community detection"""
+        # Check if networks are available
+        if not self.communityDetector:
+            if not self.initializeCommunityDetector():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Networks Required",
+                    "Both social and road networks must be selected."
+                )
+                return
+        
+        # Update status
+        self.__windows[9].statusLabel.setText("Precomputing... This may take several minutes.")
+        self.__windows[9].precompBtn.setEnabled(False)
+        self.__windows[9].searchBtn.setEnabled(False)
+        self.__windows[9].repaint()  # Force UI update
+        
+        # Perform precomputation
+        try:
+            # Start with r=1 (faster)
+            self.communityDetector.precompute_radius_subgraphs(radius=1, verbose=True)
+            
+            # Then do r=2
+            self.communityDetector.precompute_radius_subgraphs(radius=2, verbose=True)
+            
+            # Update state
+            self.precomputed = True
+            self.__windows[9].precompCheck.setChecked(True)
+            self.__windows[9].statusLabel.setText("Precomputation complete!")
+            
+        except Exception as e:
+            self.__windows[9].statusLabel.setText(f"Error: {str(e)}")
+        
+        # Re-enable buttons
+        self.__windows[9].precompBtn.setEnabled(True)
+        self.__windows[9].searchBtn.setEnabled(True)
+
+    def findCommunities(self):
+        """Find communities using bit vector optimization"""
+        # Check if networks are available
+        if not self.communityDetector:
+            if not self.initializeCommunityDetector():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Networks Required",
+                    "Both social and road networks must be selected."
+                )
+                return
+        
+        # Get query user's keywords
+        query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
+        if not query_keywords:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No Keywords Found",
+                "The selected query user has no keywords."
+            )
+            return
+        
+        # Get other parameters
+        top_k = self.__windows[9].topKInput.value()
+        radius = int(self.__windows[9].radiusCombo.currentText())
+        min_similarity = self.__windows[9].minSimInput.value()
+        use_precomputation = self.__windows[9].precompCheck.isChecked() and self.precomputed
+        
+        # Update status
+        self.__windows[9].statusLabel.setText("Finding communities...")
+        self.__windows[9].searchBtn.setEnabled(False)
+        self.__windows[9].repaint()  # Force UI update
+        
+        try:
+            # Start timing
+            self.CTstart = time.time()
+            
+            # Find communities
+            communities = self.communityDetector.find_top_k_communities(
+                query_keywords,
+                k=top_k,
+                radius=radius,
+                min_similarity=min_similarity,
+                use_precomputation=use_precomputation
+            )
+            
+            # End timing
+            self.CTend = time.time()
+            self.__UpdateQueryTime()
+            
+            # Update status
+            if communities:
+                self.__windows[9].statusLabel.setText(f"Found {len(communities)} communities.")
+                
+                # Store communities for later use
+                self.current_communities = communities
+                
+                # Visualize communities
+                self.visualizeCommunities(communities)
+                
+                # Close dialog
+                self.__windows[9].accept()
+            else:
+                self.__windows[9].statusLabel.setText("No communities found matching criteria.")
+        
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.__windows[9].statusLabel.setText(f"Error: {str(e)}")
+        
+        # Re-enable search button
+        self.__windows[9].searchBtn.setEnabled(True)
+
+    def visualizeCommunities(self, communities):
+        """Visualize communities on the map and in the social network view"""
+        if not communities:
+            return
+    
+        # Clear previous visualization
+        self.clearView()
+    
+        # Create plots
+        self.createSumPlot("Community Detection")
+    
+        # Visualize road network if available
+        if self.selectedRoadNetwork:
+            self.selectedRoadNetwork.visualize(self.roadGraphWidget)
+    
+        # Use different colors for different communities
+        community_colors = [
+            (50, 50, 200),  # Blue
+            (200, 50, 50),  # Red
+            (50, 200, 50),  # Green
+            (200, 200, 50),  # Yellow
+            (200, 50, 200),  # Purple
+            (50, 200, 200),  # Cyan
+            (150, 100, 50),  # Brown
+            (100, 150, 50),  # Olive
+            (50, 100, 150),  # Steel Blue
+            (150, 50, 100),  # Dark Pink
+        ]
+    
+        # Visualize all communities on the map with different colors
+        for i, community in enumerate(communities):
+            color_idx = i % len(community_colors)
+            color = community_colors[color_idx]
+        
+            # Plot community members
+            x = []
+            y = []
+            for user in community['users']:
+                try:
+                    user_location = self.selectedSocialNetwork.userLoc(user)
+                    x.append(float(user_location[0][0]))
+                    y.append(float(user_location[0][1]))
+                except:
+                    continue
+        
+            if x and y:
+                self.roadGraphWidget.plot(x, y, pen=None, symbol='o', symbolSize=10,
+                                    symbolPen=(*color, 100), 
+                                    symbolBrush=(*color, 175))
+        
+            # Highlight center user with star
+            try:
+                center_loc = self.selectedSocialNetwork.userLoc(community['center'])
+                self.roadGraphWidget.plot([float(center_loc[0][0])], [float(center_loc[0][1])], 
+                                   pen=None, symbol='star', symbolSize=30,
+                                   symbolPen=(*color, 255), symbolBrush=(*color, 255))
+            except:
+                pass
+    
+        # Create network graph for visualization of top community
+        top_community = communities[0]
+        network = nx.Graph()
+    
+        # Add center node for top community
+        network.add_node(
+            top_community['center'], 
+            physics=False, 
+            label=f"Center: {top_community['center']}", 
+            color='green', 
+            size=15, 
+            shape='star'
+        )
+    
+        # Add top community members
+        for user in top_community['users']:
+            if user != top_community['center']:
+                network.add_node(user, physics=False, label=str(user), color='blue', size=15)
+    
+        # Add connections for top community
+        for user in top_community['users']:
+            try:
+                rels = self.selectedSocialNetwork.getUserRel(user)
+                rel_users = []
+                for r in rels:
+                    rel_users.append(r[0])
+            
+                relations = set(rel_users) & set(top_community['users'])
+                for r in relations:
+                    network.add_edge(user, r, color='black')
+            except:
+                continue
+    
+        # Create interactive visualization with better configuration
+        nt = Network('100%', '600px', notebook=False)
+        nt.from_nx(network)
+    
+        # Set better options for visualization
+        nt.set_options("""
+        {
+            "nodes": {
+                "font": {"size": 12, "face": "Arial"},
+                "scaling": {"min": 10, "max": 30}
+            },
+            "edges": {
+                "color": {"inherit": false},
+                "smooth": {"type": "continuous", "forceDirection": "none"}
+            },
+            "physics": {
+                "barnesHut": {
+                    "gravitationalConstant": -2000,
+                    "centralGravity": 0.3,
+                    "springLength": 95,
+                    "springConstant": 0.04
+                },
+                "minVelocity": 0.75
+            },
+            "interaction": {
+                "navigationButtons": true,
+                "keyboard": true
+            }
+        }
+        """)
+        nt.save_graph('bitvector-community-detection.html')
+    
+        # Create the web view with better handling
+        self.socialNetWidget = QWebEngineView()
+    
+        # Read the HTML content
+        try:
+            with open('bitvector-community-detection.html', 'r', encoding='utf-8') as f:
+                html = f.read()
+                # Make sure the HTML has the correct size
+                html = html.replace('<div id="mynetwork"></div>', 
+                               '<div id="mynetwork" style="width:100%;height:100%;"></div>')
+                self.socialNetWidget.setHtml(html)
+        except Exception as e:
+            print(f"Error loading the network visualization: {str(e)}")
+            # Fallback to empty view
+            self.socialNetWidget.setHtml("<html><body><h2>Network visualization could not be loaded</h2></body></html>")
+    
+        # Schedule a reload after a short delay to ensure proper rendering
+        QTimer.singleShot(500, self.socialNetWidget.reload)
+    
+        # Create ranked communities table for left panel
+        communities_table = QtWidgets.QTableWidget()
+        communities_table.setRowCount(len(communities))
+        communities_table.setColumnCount(4)
+        communities_table.setHorizontalHeaderLabels(["Center", "Size", "Score", "View"])
+        communities_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        communities_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        communities_table.verticalHeader().setVisible(False)
+        communities_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        communities_table.setShowGrid(True)
+        communities_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2D2D2D;
+                color: white;
+                border: none;
+            }
+            QTableWidget::item { 
+                padding: 5px;
+                border-bottom: 1px solid #444;
+            }
+            QHeaderView::section {
+                background-color: #2D2D2D;
+                color: white;
+                padding: 5px;
+                border: none;
+                border-bottom: 1px solid #444;
+                font-weight: bold;
+            }
+        """)
+    
+        # Populate communities table
+        for i, community in enumerate(communities):
+            # Center user
+            center_item = QtWidgets.QTableWidgetItem(str(community['center']))
+            center_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            communities_table.setItem(i, 0, center_item)
+        
+            # Size
+            size_item = QtWidgets.QTableWidgetItem(str(community['size']))
+            size_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            communities_table.setItem(i, 1, size_item)
+        
+            # Score
+            score_item = QtWidgets.QTableWidgetItem(f"{community['score']:.4f}")
+            score_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            communities_table.setItem(i, 2, score_item)
+        
+            # View button
+            view_button = QtWidgets.QPushButton("View")
+            view_button.setStyleSheet("background-color: #4CAF50; color: white;")
+            view_button.clicked.connect(lambda checked, idx=i: self.viewCommunity(idx))
+            communities_table.setCellWidget(i, 3, view_button)
+    
+        communities_table.resizeColumnsToContents()
+    
+        # Update layout for community view
+        self.view = QtWidgets.QWidget()
+        self.view.setContentsMargins(0, 0, 0, 0)
+    
+        # Create a main layout with no spacing
+        main_layout = QtWidgets.QHBoxLayout(self.view)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+    
+        # Left panel (community list) - Made wider
+        left_panel = QtWidgets.QWidget()
+        left_panel.setMinimumWidth(350)  # Increased from 250
+        left_panel.setMaximumWidth(400)  # Increased from 300
+        left_panel.setStyleSheet("background-color: #2D2D2D; color: white;")
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+    
+        # Add title to the left panel
+        title_label = QtWidgets.QLabel("Ranked Communities")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold; padding: 10px; border-bottom: 1px solid #444;")
+        title_label.setAlignment(QtCore.Qt.AlignCenter)
+        left_layout.addWidget(title_label)
+    
+        # Add table to the left panel (set to expand vertically to fill all space)
+        left_layout.addWidget(communities_table, 1)  # 1 means stretch factor, makes it expand to fill space
+    
+        # Right section (contains map and score)
+        right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+    
+        # Add map to the right panel
+        right_layout.addWidget(self.win, 3)  # Top section takes 3/4 of height
+    
+        # Add score information
+        score_widget = QtWidgets.QWidget()
+        score_widget.setStyleSheet("background-color: #2D2D2D; color: white;")
+        score_layout = QtWidgets.QVBoxLayout(score_widget)
+        score_layout.setContentsMargins(10, 10, 10, 10)
+    
+        # Title
+        score_title = QtWidgets.QLabel("Community Score")
+        score_title.setStyleSheet("font-size: 16pt; font-weight: bold;")
+        score_title.setAlignment(QtCore.Qt.AlignCenter)
+        score_layout.addWidget(score_title)
+    
+        # Overall score
+        overall = QtWidgets.QLabel(f"Overall Score: {top_community['score']:.4f}")
+        overall.setStyleSheet("font-size: 14pt;")
+        overall.setAlignment(QtCore.Qt.AlignCenter)
+        score_layout.addWidget(overall)
+    
+        # Component scores - with explicit labels and progress bars
+        components = top_community['components']
+    
+        # Keywords score
+        keywords_layout = QtWidgets.QHBoxLayout()
+        keywords_label = QtWidgets.QLabel("Keywords (40%):")
+        keywords_label.setMinimumWidth(120)
+        keywords_layout.addWidget(keywords_label)
+    
+        keywords_bar = QtWidgets.QProgressBar()
+        keywords_bar.setObjectName("keywords_bar")
+        keywords_bar.setRange(0, 100)
+        keywords_bar.setValue(int(components['keywords'] * 100))
+        keywords_bar.setFormat(f"{components['keywords']:.2f}")
+        keywords_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
+        keywords_layout.addWidget(keywords_bar)
+        score_layout.addLayout(keywords_layout)
+    
+        # Distance score
+        distance_layout = QtWidgets.QHBoxLayout()
+        distance_label = QtWidgets.QLabel("Distance (30%):")
+        distance_label.setMinimumWidth(120)
+        distance_layout.addWidget(distance_label)
+    
+        distance_bar = QtWidgets.QProgressBar()
+        distance_bar.setObjectName("distance_bar")
+        distance_bar.setRange(0, 100)
+        distance_bar.setValue(int(components['distance'] * 100))
+        distance_bar.setFormat(f"{components['distance']:.2f}")
+        distance_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
+        distance_layout.addWidget(distance_bar)
+        score_layout.addLayout(distance_layout)
+    
+        # Connections score
+        connections_layout = QtWidgets.QHBoxLayout()
+        connections_label = QtWidgets.QLabel("Connections (30%):")
+        connections_label.setMinimumWidth(120)
+        connections_layout.addWidget(connections_label)
+    
+        connections_bar = QtWidgets.QProgressBar()
+        connections_bar.setObjectName("connections_bar")
+        connections_bar.setRange(0, 100)
+        connections_bar.setValue(int(components['connections'] * 100))
+        connections_bar.setFormat(f"{components['connections']:.2f}")
+        connections_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
+        connections_layout.addWidget(connections_bar)
+        score_layout.addLayout(connections_layout)
+    
+        # Community stats
+        stats = QtWidgets.QLabel(f"Size: {top_community['size']} users\nCenter: {top_community['center']}")
+        stats.setAlignment(QtCore.Qt.AlignCenter)
+        score_layout.addWidget(stats)
+    
+        # Add score widget to right layout
+        right_layout.addWidget(score_widget, 1)  # Bottom section takes 1/4 of height
+    
+        # Add panels to main layout
+        main_layout.addWidget(left_panel)
+        main_layout.addWidget(right_panel, 1)  # Give right section priority to expand
+    
+        # Set central widget
+        self.setCentralWidget(self.view)
+        self.toolbar.navToolbar()
+        self.timeline.hide()
+
+    def viewCommunity(self, community_idx):
+        """Switch visualization to show the selected community"""
+        if not self.current_communities or community_idx >= len(self.current_communities):
+            return
+    
+        # Get the selected community
+        community = self.current_communities[community_idx]
+    
+        # Create network graph for visualization
+        network = nx.Graph()
+    
+        # Add center node
+        network.add_node(
+            community['center'], 
+            physics=False, 
+            label=f"Center: {community['center']}", 
+            color='green', 
+            size=15, 
+            shape='star'
+        )
+    
+        # Add community members
+        for user in community['users']:
+            if user != community['center']:
+                network.add_node(user, physics=False, label=str(user), color='blue', size=15)
+    
+        # Add connections
+        for user in community['users']:
+            try:
+                rels = self.selectedSocialNetwork.getUserRel(user)
+                rel_users = []
+                for r in rels:
+                    rel_users.append(r[0])
+            
+                relations = set(rel_users) & set(community['users'])
+                for r in relations:
+                    network.add_edge(user, r, color='black')
+            except:
+                continue
+    
+        # Create interactive visualization with better configuration
+        nt = Network('100%', '600px', notebook=False)
+        nt.from_nx(network)
+    
+        # Set better options for visualization
+        nt.set_options("""
+        {
+            "nodes": {
+                "font": {"size": 12, "face": "Arial"},
+                "scaling": {"min": 10, "max": 30}
+            },
+            "edges": {
+                "color": {"inherit": false},
+                "smooth": {"type": "continuous", "forceDirection": "none"}
+            },
+            "physics": {
+                "barnesHut": {
+                    "gravitationalConstant": -2000,
+                    "centralGravity": 0.3,
+                    "springLength": 95,
+                    "springConstant": 0.04
+                },
+                "minVelocity": 0.75
+            },
+            "interaction": {
+                "navigationButtons": true,
+                "keyboard": true
+            }
+        }
+        """)
+        nt.save_graph('bitvector-community-detection.html')
+    
+        # Update web view
+        try:
+            with open('bitvector-community-detection.html', 'r', encoding='utf-8') as f:
+                html = f.read()
+                # Make sure the HTML has the correct size
+                html = html.replace('<div id="mynetwork"></div>', 
+                                '<div id="mynetwork" style="width:100%;height:100%;"></div>')
+                self.socialNetWidget.setHtml(html)
+            
+            # Schedule a reload after a short delay to ensure proper rendering
+            QTimer.singleShot(500, self.socialNetWidget.reload)
+        except Exception as e:
+            print(f"Error updating network visualization: {str(e)}")
+    
+        # Update score information
+        components = community['components']
+    
+        # Find score widget
+        for widget in self.findChildren(QtWidgets.QLabel):
+            if widget.text().startswith("Overall Score:"):
+                widget.setText(f"Overall Score: {community['score']:.4f}")
+            elif widget.text().startswith("Size:"):
+                widget.setText(f"Size: {community['size']} users\nCenter: {community['center']}")
+    
+        # Update progress bars
+        keywords_bar = self.findChild(QtWidgets.QProgressBar, "keywords_bar")
+        if keywords_bar:
+            keywords_bar.setValue(int(components['keywords'] * 100))
+            keywords_bar.setFormat(f"{components['keywords']:.2f}")
+        
+        distance_bar = self.findChild(QtWidgets.QProgressBar, "distance_bar")
+        if distance_bar:
+            distance_bar.setValue(int(components['distance'] * 100))
+            distance_bar.setFormat(f"{components['distance']:.2f}")
+        
+        connections_bar = self.findChild(QtWidgets.QProgressBar, "connections_bar")
+        if connections_bar:
+            connections_bar.setValue(int(components['connections'] * 100))
+            connections_bar.setFormat(f"{components['connections']:.2f}")
+
     def __keywordCommunity(self):
         self.queryInput.community()
 
@@ -207,6 +880,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         menu.addChild("kd-truss", "Query", tooltip="kd-truss menu", action=self.__queryInput)
         menu.addChild("Community Search", "Query", tooltip="community search menu", action=self.__keywordCommunity)
         menu.addChild("Community Search w/ Time", "Query", tooltip="community search w/ time menu", action=self.__keywordTimeCommunity)
+        menu.addChild("BitVector Community Search", "Query", tooltip="optimized community search", action=self.__bitvectorCommunitySearch)
 
     def clearView(self):
         self.win.removeItem(self.roadGraphWidget)
@@ -395,44 +1069,6 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
     #def visualizeKdData(self, users, keys, hops, dists):
     def visualizeKdData(self, kdTree):
         if self.queryUser is not None:
-            """ 
-
-            Interactive code has been moved to the KDTrust class
-
-            # Create Interactive Graph HTML File Using pyvis
-            network = nx.Graph()
-            titleTemp = '<p>Keywords:</p><ol>'
-            # Add query user
-            queryKeys = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
-            for key in queryKeys:
-                titleTemp += '<li>' + str(self.selectedSocialNetwork.getKeywordByID(key)) + '</li>'
-            titleTemp += '</ol>'
-            network.add_node(self.queryUser[0], physics=False, label=str('Query: ') + str(int(float(self.queryUser[0]))),
-                             color='green', size=15, shape='star', title=titleTemp)
-            # Add common users
-            common = self.selectedSocialNetwork.userLoc(self.queryUser[0])
-            commonLoc = self.selectedRoadNetwork.findNearest(common)
-            for user in users:
-                query = self.selectedSocialNetwork.userLoc(user)
-                d = dists[user]
-                h = hops[user]
-                if h == -1:
-                    h = 1
-                k = keys[user]
-                temp = '<p>Number of hops: ' + str(h) + '</p><p>Distance: ' + str(d) + '</p><p>Common Keywords:</p><ol>'
-                for key in k:
-                    temp += '<li>' + str(self.selectedSocialNetwork.getKeywordByID(key)) + '</li>'
-                temp += '</ol>'
-                if user != self.queryUser[0]:
-                    network.add_node(user, physics=False, label=str(int(float(user))), color='blue', title=temp)
-                rels = self.selectedSocialNetwork.commonRelations(user, users)
-                for rel in rels:
-                    network.add_edge(rel, user, color='blue')
-            """
-
-
-
-
             graph = self.interactiveKdVisualNodes(kdTree, graph=nx.Graph())
             titleTemp = '<p>Keywords:</p><ol>'
             # Add query user
@@ -650,9 +1286,24 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             self.CTstart = time.time()
             #community = self.communityTree(self.queryUser[0], queryKeywords, queryRels, float(self.__windows[6].kcTextBox.text()), float(self.__windows[6].kTextBox.text()), float(self.__windows[6].rTextBox.text()), float(self.__windows[6].dTextBox.text()), float(self.__windows[6].eTextBox.text()),[], 0, 0)
             res = self.queryInput.getCommunityResponse()
-            community = self.communityTree(self.queryUser[0], queryKeywords, queryRels, float(res[0]), float(res[3]), float(res[4]), float(res[1]), float(res[2]), [], 0, 0)
-            community = self.pruneTree(community)
-            temp_users = self.treeUsers()
+            
+            # Use the bridge to process with bitvector optimization
+            community_tree = self.community_bridge.process_community_query(
+                self.queryUser[0],
+                queryKeywords,
+                res[0],      # min keywords
+                res[3],      # radius
+                res[2]       # min similarity 
+            )
+            
+            if not community_tree:
+                # Fallback to original implementation if bridge fails
+                community = self.communityTree(self.queryUser[0], queryKeywords, queryRels, float(res[0]), float(res[3]), float(res[4]), float(res[1]), float(res[2]), [], 0, 0)
+                community = self.pruneTree(community)
+            else:
+                community = community_tree
+                
+            temp_users = self.treeUsers(community)
             users = list(set(temp_users[0]) | set(temp_users[1]))
             for user in users:
                 self.communityUserPos[user] = {
@@ -1121,6 +1772,9 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 self.visualizeSummaryData(self.ids, self.centers, sizes, relations, popSize)
             self.plotQueryUser()
             #self.linkGraphAxis()
+        
+        # Initialize community detector
+        self.initializeCommunityDetector()
 
     def displaySocialNetwork(self, network):
         self.queryUser = None
@@ -1157,6 +1811,9 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 self.selectedSocialNetwork = self.__socialNetworkObjs[network]
                 self.ids, self.centers, sizes, relations, popSize = self.selectedSocialNetwork.getSummaryClusters(self.toolbar.clusterInput.textBox.text())
                 self.visualizeSummaryData(self.ids, self.centers, sizes, relations, popSize)
+                
+        # Initialize community detector
+        self.initializeCommunityDetector()
 
     # Creates network instances based on text data dictionary of {"NetworkName": {"Data":"Value", ...}
     # If the value is not set, square brackets denote that it is not set, written as "[Value]"
