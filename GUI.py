@@ -15,6 +15,7 @@ from RoadNetwork import RoadNetwork
 from SocialNetwork import SocialNetwork
 from BitVectorCommunityDetector import BitVectorCommunityDetector
 from CommunityBridge import CommunityBridge
+from CommunityScorer import CommunityScorer
 from sklearn.cluster import KMeans
 from pyvis.network import Network
 import networkx as nx
@@ -121,6 +122,13 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         # Storage for community results
         self.current_communities = []
+        
+        # Store scoring weights
+        self.current_scoring_weights = {
+            'keyword': 0.4,
+            'distance': 0.3,
+            'connection': 0.3
+        }
 
 
     # Creates the plot widgets. suffix is used when a summary graph is created, for example
@@ -168,11 +176,40 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
     def initializeCommunityDetector(self):
         """Initialize or update the community detector with current networks"""
         if self.selectedSocialNetwork and self.selectedRoadNetwork:
+            # Get weights from dialog if it exists
+            keyword_weight = 0.4
+            distance_weight = 0.3
+            connection_weight = 0.3
+            
+            if hasattr(self, 'bitvectorDialog') and self.__windows.get(9) is not None:
+                # Get values from sliders
+                keyword_weight = self.__windows[9].keywordWeightSlider.value() / 100
+                distance_weight = self.__windows[9].distanceWeightSlider.value() / 100
+                connection_weight = self.__windows[9].connectionWeightSlider.value() / 100
+                
+                # Normalize weights
+                total = keyword_weight + distance_weight + connection_weight
+                if total > 0:
+                    keyword_weight = keyword_weight / total
+                    distance_weight = distance_weight / total
+                    connection_weight = connection_weight / total
+            
             self.communityDetector = BitVectorCommunityDetector(
                 self.selectedSocialNetwork, 
-                self.selectedRoadNetwork
+                self.selectedRoadNetwork,
+                keyword_weight=keyword_weight,
+                distance_weight=distance_weight,
+                connection_weight=connection_weight
             )
             self.precomputed = False
+            
+            # Update current scoring weights
+            self.current_scoring_weights = {
+                'keyword': keyword_weight,
+                'distance': distance_weight,
+                'connection': connection_weight
+            }
+            
             return True
         return False
 
@@ -192,7 +229,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             self.__windows[9] = QtWidgets.QDialog(self)
             self.__windows[9].setWindowTitle("BitVector Community Search")
             self.__windows[9].setWindowModality(QtCore.Qt.ApplicationModal)
-            self.__windows[9].resize(400, 350)
+            self.__windows[9].resize(500, 550)  # Increased size for additional parameters
             
             # Main layout
             layout = QtWidgets.QVBoxLayout(self.__windows[9])
@@ -234,6 +271,86 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             self.__windows[9].minSimInput.setValue(0.01)
             form.addRow("Minimum Similarity:", self.__windows[9].minSimInput)
             
+            # Add section header for scoring weights
+            scoring_header = QtWidgets.QLabel("Scoring Weights")
+            scoring_header.setStyleSheet("font-weight: bold; margin-top: 10px;")
+            form.addRow(scoring_header)
+            
+            # Create a helper function for creating weight sliders
+            def create_weight_slider(default_value=0.33):
+                slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+                slider.setRange(1, 100)
+                slider.setValue(int(default_value * 100))
+                slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+                slider.setTickInterval(10)
+                
+                # Create label to show current value
+                value_label = QtWidgets.QLabel(f"{default_value:.2f}")
+                
+                # Update label when slider changes
+                slider.valueChanged.connect(lambda v: value_label.setText(f"{v/100:.2f}"))
+                
+                # Create layout for slider and label
+                slider_layout = QtWidgets.QHBoxLayout()
+                slider_layout.addWidget(slider)
+                slider_layout.addWidget(value_label)
+                
+                return slider_layout, slider
+            
+            # Keyword weight slider (default: 0.4)
+            keyword_layout, self.__windows[9].keywordWeightSlider = create_weight_slider(0.4)
+            form.addRow("Keyword Weight:", keyword_layout)
+            
+            # Distance weight slider (default: 0.3)
+            distance_layout, self.__windows[9].distanceWeightSlider = create_weight_slider(0.3)
+            form.addRow("Distance Weight:", distance_layout)
+            
+            # Connection weight slider (default: 0.3)
+            connection_layout, self.__windows[9].connectionWeightSlider = create_weight_slider(0.3)
+            form.addRow("Connection Weight:", connection_layout)
+            
+            # Helper function for weight normalization
+            def normalize_weights():
+                # Get current values
+                kw = self.__windows[9].keywordWeightSlider.value() / 100
+                dw = self.__windows[9].distanceWeightSlider.value() / 100
+                cw = self.__windows[9].connectionWeightSlider.value() / 100
+                
+                # Normalize to sum to 1
+                total = kw + dw + cw
+                if total > 0:
+                    kw = kw / total
+                    dw = dw / total
+                    cw = cw / total
+                
+                # Update sliders without triggering their signals
+                self.__windows[9].keywordWeightSlider.blockSignals(True)
+                self.__windows[9].distanceWeightSlider.blockSignals(True)
+                self.__windows[9].connectionWeightSlider.blockSignals(True)
+                
+                self.__windows[9].keywordWeightSlider.setValue(int(kw * 100))
+                self.__windows[9].distanceWeightSlider.setValue(int(dw * 100))
+                self.__windows[9].connectionWeightSlider.setValue(int(cw * 100))
+                
+                self.__windows[9].keywordWeightSlider.blockSignals(False)
+                self.__windows[9].distanceWeightSlider.blockSignals(False)
+                self.__windows[9].connectionWeightSlider.blockSignals(False)
+                
+                # Update labels
+                self.__windows[9].keywordWeightSlider.valueChanged.emit(self.__windows[9].keywordWeightSlider.value())
+                self.__windows[9].distanceWeightSlider.valueChanged.emit(self.__windows[9].distanceWeightSlider.value())
+                self.__windows[9].connectionWeightSlider.valueChanged.emit(self.__windows[9].connectionWeightSlider.value())
+            
+            # Add normalize button
+            normalize_btn = QtWidgets.QPushButton("Normalize Weights")
+            normalize_btn.clicked.connect(normalize_weights)
+            form.addRow("", normalize_btn)
+            
+            # Add section header for Optimization
+            optimization_header = QtWidgets.QLabel("Optimization Settings")
+            optimization_header.setStyleSheet("font-weight: bold; margin-top: 10px;")
+            form.addRow(optimization_header)
+            
             # Precomputation
             precompFrame = QtWidgets.QHBoxLayout()
             self.__windows[9].precompCheck = QtWidgets.QCheckBox("Use Precomputation")
@@ -243,6 +360,16 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             precompFrame.addWidget(self.__windows[9].precompCheck)
             precompFrame.addWidget(self.__windows[9].precompBtn)
             form.addRow("Precomputation:", precompFrame)
+            
+            # BitVector Tree optimization
+            self.__windows[9].treeOptCheck = QtWidgets.QCheckBox("Use BitVector Tree")
+            self.__windows[9].treeOptCheck.setChecked(False)
+            self.__windows[9].buildTreeBtn = QtWidgets.QPushButton("Build Tree Now")
+            self.__windows[9].buildTreeBtn.clicked.connect(self.buildBitVectorTree)
+            treeOptFrame = QtWidgets.QHBoxLayout()
+            treeOptFrame.addWidget(self.__windows[9].treeOptCheck)
+            treeOptFrame.addWidget(self.__windows[9].buildTreeBtn)
+            form.addRow("Tree Optimization:", treeOptFrame)
             
             # Status label
             self.__windows[9].statusLabel = QtWidgets.QLabel("Ready")
@@ -287,6 +414,35 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         # Show dialog
         self.__windows[9].show()
+
+    def buildBitVectorTree(self):
+        """Build bit vector tree for optimization"""
+        # Check if networks are available
+        if not self.communityDetector:
+            if not self.initializeCommunityDetector():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Networks Required",
+                    "Both social and road networks must be selected."
+                )
+                return
+        
+        # Update status
+        self.__windows[9].statusLabel.setText("Building BitVector Tree... This may take several minutes.")
+        self.__windows[9].buildTreeBtn.setEnabled(False)
+        self.__windows[9].searchBtn.setEnabled(False)
+        self.__windows[9].repaint()  # Force UI update
+        
+        # Build tree
+        try:
+            self.communityDetector.build_bit_vector_tree()
+            self.__windows[9].statusLabel.setText("BitVector Tree built successfully!")
+        except Exception as e:
+            self.__windows[9].statusLabel.setText(f"Error: {str(e)}")
+        
+        # Re-enable buttons
+        self.__windows[9].buildTreeBtn.setEnabled(True)
+        self.__windows[9].searchBtn.setEnabled(True)
 
     def precomputeSubgraphs(self):
         """Precompute subgraphs for faster community detection"""
@@ -348,11 +504,38 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             )
             return
         
-        # Get other parameters
+        # Get parameters
         top_k = self.__windows[9].topKInput.value()
         radius = int(self.__windows[9].radiusCombo.currentText())
         min_similarity = self.__windows[9].minSimInput.value()
         use_precomputation = self.__windows[9].precompCheck.isChecked() and self.precomputed
+        use_tree_optimization = self.__windows[9].treeOptCheck.isChecked()
+        
+        # Get scoring weights
+        keyword_weight = self.__windows[9].keywordWeightSlider.value() / 100
+        distance_weight = self.__windows[9].distanceWeightSlider.value() / 100
+        connection_weight = self.__windows[9].connectionWeightSlider.value() / 100
+        
+        # Normalize weights
+        total = keyword_weight + distance_weight + connection_weight
+        if total > 0:
+            keyword_weight = keyword_weight / total
+            distance_weight = distance_weight / total
+            connection_weight = connection_weight / total
+        
+        # Update community detector with new weights
+        self.communityDetector.scorer = CommunityScorer(
+            keyword_weight=keyword_weight,
+            distance_weight=distance_weight,
+            connection_weight=connection_weight
+        )
+        
+        # Store the current weights for visualization
+        self.current_scoring_weights = {
+            'keyword': keyword_weight,
+            'distance': distance_weight,
+            'connection': connection_weight
+        }
         
         # Update status
         self.__windows[9].statusLabel.setText("Finding communities...")
@@ -369,7 +552,8 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 k=top_k,
                 radius=radius,
                 min_similarity=min_similarity,
-                use_precomputation=use_precomputation
+                use_precomputation=use_precomputation,
+                use_tree_optimization=use_tree_optimization
             )
             
             # End timing
@@ -403,22 +587,22 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         """Visualize communities on the map and in the social network view"""
         if not communities:
             return
-    
+        
         # Clear previous visualization
         self.clearView()
-    
+        
         # Create plots
         self.createSumPlot("Community Detection")
-    
+        
         # Visualize road network if available
         if self.selectedRoadNetwork:
             self.selectedRoadNetwork.visualize(self.roadGraphWidget)
-    
+        
         # Use different colors for different communities
         community_colors = [
-            (50, 50, 200),  # Blue
-            (200, 50, 50),  # Red
-            (50, 200, 50),  # Green
+            (50, 50, 200),   # Blue
+            (200, 50, 50),   # Red
+            (50, 200, 50),   # Green
             (200, 200, 50),  # Yellow
             (200, 50, 200),  # Purple
             (50, 200, 200),  # Cyan
@@ -427,7 +611,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             (50, 100, 150),  # Steel Blue
             (150, 50, 100),  # Dark Pink
         ]
-    
+        
         # Visualize all communities on the map with different colors
         for i, community in enumerate(communities):
             color_idx = i % len(community_colors)
@@ -453,15 +637,15 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             try:
                 center_loc = self.selectedSocialNetwork.userLoc(community['center'])
                 self.roadGraphWidget.plot([float(center_loc[0][0])], [float(center_loc[0][1])], 
-                                   pen=None, symbol='star', symbolSize=30,
-                                   symbolPen=(*color, 255), symbolBrush=(*color, 255))
+                               pen=None, symbol='star', symbolSize=30,
+                               symbolPen=(*color, 255), symbolBrush=(*color, 255))
             except:
                 pass
-    
+        
         # Create network graph for visualization of top community
         top_community = communities[0]
         network = nx.Graph()
-    
+        
         # Add center node for top community
         network.add_node(
             top_community['center'], 
@@ -471,12 +655,12 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             size=15, 
             shape='star'
         )
-    
+        
         # Add top community members
         for user in top_community['users']:
             if user != top_community['center']:
                 network.add_node(user, physics=False, label=str(user), color='blue', size=15)
-    
+        
         # Add connections for top community
         for user in top_community['users']:
             try:
@@ -490,11 +674,11 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                     network.add_edge(user, r, color='black')
             except:
                 continue
-    
+        
         # Create interactive visualization with better configuration
         nt = Network('100%', '600px', notebook=False)
         nt.from_nx(network)
-    
+        
         # Set better options for visualization
         nt.set_options("""
         {
@@ -522,10 +706,10 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         }
         """)
         nt.save_graph('bitvector-community-detection.html')
-    
+        
         # Create the web view with better handling
         self.socialNetWidget = QWebEngineView()
-    
+        
         # Read the HTML content
         try:
             with open('bitvector-community-detection.html', 'r', encoding='utf-8') as f:
@@ -538,10 +722,10 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             print(f"Error loading the network visualization: {str(e)}")
             # Fallback to empty view
             self.socialNetWidget.setHtml("<html><body><h2>Network visualization could not be loaded</h2></body></html>")
-    
+        
         # Schedule a reload after a short delay to ensure proper rendering
         QTimer.singleShot(500, self.socialNetWidget.reload)
-    
+        
         # Create ranked communities table for left panel
         communities_table = QtWidgets.QTableWidget()
         communities_table.setRowCount(len(communities))
@@ -571,7 +755,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 font-weight: bold;
             }
         """)
-    
+        
         # Populate communities table
         for i, community in enumerate(communities):
             # Center user
@@ -594,18 +778,18 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             view_button.setStyleSheet("background-color: #4CAF50; color: white;")
             view_button.clicked.connect(lambda checked, idx=i: self.viewCommunity(idx))
             communities_table.setCellWidget(i, 3, view_button)
-    
+        
         communities_table.resizeColumnsToContents()
-    
-        # Update layout for community view
+        
+        # Create a new widget before setting up layouts
         self.view = QtWidgets.QWidget()
         self.view.setContentsMargins(0, 0, 0, 0)
-    
+        
         # Create a main layout with no spacing
         main_layout = QtWidgets.QHBoxLayout(self.view)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-    
+        
         # Left panel (community list) - Made wider
         left_panel = QtWidgets.QWidget()
         left_panel.setMinimumWidth(350)  # Increased from 250
@@ -614,52 +798,76 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
-    
+        
         # Add title to the left panel
         title_label = QtWidgets.QLabel("Ranked Communities")
         title_label.setStyleSheet("font-size: 16pt; font-weight: bold; padding: 10px; border-bottom: 1px solid #444;")
         title_label.setAlignment(QtCore.Qt.AlignCenter)
         left_layout.addWidget(title_label)
-    
+        
         # Add table to the left panel (set to expand vertically to fill all space)
         left_layout.addWidget(communities_table, 1)  # 1 means stretch factor, makes it expand to fill space
-    
+        
         # Right section (contains map and score)
         right_panel = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-    
+        
+        # Create a custom toolbar widget and add it to the top of the view
+        toolbar_widget = QtWidgets.QWidget()
+        toolbar_layout = QtWidgets.QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(2, 2, 2, 2)
+        
+        # Add back button
+        back_btn = QtWidgets.QPushButton("Back")
+        back_btn.clicked.connect(self.viewSummary)
+        toolbar_layout.addWidget(back_btn)
+        
+        # Add some spacing
+        toolbar_layout.addStretch()
+        
+        # Add the toolbar to the top of the right panel
+        right_layout.addWidget(toolbar_widget)
+        
         # Add map to the right panel
         right_layout.addWidget(self.win, 3)  # Top section takes 3/4 of height
-    
+        
         # Add score information
         score_widget = QtWidgets.QWidget()
         score_widget.setStyleSheet("background-color: #2D2D2D; color: white;")
         score_layout = QtWidgets.QVBoxLayout(score_widget)
         score_layout.setContentsMargins(10, 10, 10, 10)
-    
+        
         # Title
         score_title = QtWidgets.QLabel("Community Score")
         score_title.setStyleSheet("font-size: 16pt; font-weight: bold;")
         score_title.setAlignment(QtCore.Qt.AlignCenter)
         score_layout.addWidget(score_title)
-    
+        
         # Overall score
         overall = QtWidgets.QLabel(f"Overall Score: {top_community['score']:.4f}")
         overall.setStyleSheet("font-size: 14pt;")
         overall.setAlignment(QtCore.Qt.AlignCenter)
         score_layout.addWidget(overall)
-    
-        # Component scores - with explicit labels and progress bars
+        
+        # Component scores - with explicit labels and progress bars and updated weights
         components = top_community['components']
-    
-        # Keywords score
+        
+        # Default weights if not set
+        if not hasattr(self, 'current_scoring_weights'):
+            self.current_scoring_weights = {
+                'keyword': 0.4,
+                'distance': 0.3,
+                'connection': 0.3
+            }
+        
+        # Keywords score with updated weight percentage
         keywords_layout = QtWidgets.QHBoxLayout()
-        keywords_label = QtWidgets.QLabel("Keywords (40%):")
-        keywords_label.setMinimumWidth(120)
+        keywords_label = QtWidgets.QLabel(f"Keywords ({self.current_scoring_weights['keyword']*100:.0f}%):")
+        keywords_label.setMinimumWidth(150)  # Wider to accommodate percentage
         keywords_layout.addWidget(keywords_label)
-    
+        
         keywords_bar = QtWidgets.QProgressBar()
         keywords_bar.setObjectName("keywords_bar")
         keywords_bar.setRange(0, 100)
@@ -668,13 +876,13 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         keywords_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
         keywords_layout.addWidget(keywords_bar)
         score_layout.addLayout(keywords_layout)
-    
-        # Distance score
+        
+        # Distance score with updated weight percentage
         distance_layout = QtWidgets.QHBoxLayout()
-        distance_label = QtWidgets.QLabel("Distance (30%):")
-        distance_label.setMinimumWidth(120)
+        distance_label = QtWidgets.QLabel(f"Distance ({self.current_scoring_weights['distance']*100:.0f}%):")
+        distance_label.setMinimumWidth(150)  # Wider to accommodate percentage
         distance_layout.addWidget(distance_label)
-    
+        
         distance_bar = QtWidgets.QProgressBar()
         distance_bar.setObjectName("distance_bar")
         distance_bar.setRange(0, 100)
@@ -683,13 +891,13 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         distance_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
         distance_layout.addWidget(distance_bar)
         score_layout.addLayout(distance_layout)
-    
-        # Connections score
+        
+        # Connections score with updated weight percentage
         connections_layout = QtWidgets.QHBoxLayout()
-        connections_label = QtWidgets.QLabel("Connections (30%):")
-        connections_label.setMinimumWidth(120)
+        connections_label = QtWidgets.QLabel(f"Connections ({self.current_scoring_weights['connection']*100:.0f}%):")
+        connections_label.setMinimumWidth(150)  # Wider to accommodate percentage
         connections_layout.addWidget(connections_label)
-    
+        
         connections_bar = QtWidgets.QProgressBar()
         connections_bar.setObjectName("connections_bar")
         connections_bar.setRange(0, 100)
@@ -698,22 +906,23 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         connections_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
         connections_layout.addWidget(connections_bar)
         score_layout.addLayout(connections_layout)
-    
+        
         # Community stats
         stats = QtWidgets.QLabel(f"Size: {top_community['size']} users\nCenter: {top_community['center']}")
         stats.setAlignment(QtCore.Qt.AlignCenter)
         score_layout.addWidget(stats)
-    
+        
         # Add score widget to right layout
         right_layout.addWidget(score_widget, 1)  # Bottom section takes 1/4 of height
-    
+        
         # Add panels to main layout
         main_layout.addWidget(left_panel)
         main_layout.addWidget(right_panel, 1)  # Give right section priority to expand
-    
+        
         # Set central widget
         self.setCentralWidget(self.view)
-        self.toolbar.navToolbar()
+        
+        # Hide timeline
         self.timeline.hide()
 
     def viewCommunity(self, community_idx):
@@ -802,31 +1011,34 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         except Exception as e:
             print(f"Error updating network visualization: {str(e)}")
     
-        # Update score information
-        components = community['components']
-    
-        # Find score widget
+        # Find score widget and update labels with current weights
         for widget in self.findChildren(QtWidgets.QLabel):
             if widget.text().startswith("Overall Score:"):
                 widget.setText(f"Overall Score: {community['score']:.4f}")
             elif widget.text().startswith("Size:"):
                 widget.setText(f"Size: {community['size']} users\nCenter: {community['center']}")
+            elif widget.text().startswith("Keywords"):
+                widget.setText(f"Keywords ({self.current_scoring_weights['keyword']*100:.0f}%):")
+            elif widget.text().startswith("Distance"):
+                widget.setText(f"Distance ({self.current_scoring_weights['distance']*100:.0f}%):")
+            elif widget.text().startswith("Connections"):
+                widget.setText(f"Connections ({self.current_scoring_weights['connection']*100:.0f}%):")
     
         # Update progress bars
         keywords_bar = self.findChild(QtWidgets.QProgressBar, "keywords_bar")
         if keywords_bar:
-            keywords_bar.setValue(int(components['keywords'] * 100))
-            keywords_bar.setFormat(f"{components['keywords']:.2f}")
+            keywords_bar.setValue(int(community['components']['keywords'] * 100))
+            keywords_bar.setFormat(f"{community['components']['keywords']:.2f}")
         
         distance_bar = self.findChild(QtWidgets.QProgressBar, "distance_bar")
         if distance_bar:
-            distance_bar.setValue(int(components['distance'] * 100))
-            distance_bar.setFormat(f"{components['distance']:.2f}")
+            distance_bar.setValue(int(community['components']['distance'] * 100))
+            distance_bar.setFormat(f"{community['components']['distance']:.2f}")
         
         connections_bar = self.findChild(QtWidgets.QProgressBar, "connections_bar")
         if connections_bar:
-            connections_bar.setValue(int(components['connections'] * 100))
-            connections_bar.setFormat(f"{components['connections']:.2f}")
+            connections_bar.setValue(int(community['components']['connections'] * 100))
+            connections_bar.setFormat(f"{community['components']['connections']:.2f}")
 
     def __keywordCommunity(self):
         self.queryInput.community()
@@ -1287,13 +1499,35 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             #community = self.communityTree(self.queryUser[0], queryKeywords, queryRels, float(self.__windows[6].kcTextBox.text()), float(self.__windows[6].kTextBox.text()), float(self.__windows[6].rTextBox.text()), float(self.__windows[6].dTextBox.text()), float(self.__windows[6].eTextBox.text()),[], 0, 0)
             res = self.queryInput.getCommunityResponse()
             
+            # Get scoring weights from BitVector dialog if available
+            keyword_weight = 0.4
+            distance_weight = 0.3
+            connection_weight = 0.3
+            
+            if hasattr(self, 'bitvectorDialog') and self.__windows.get(9) is not None:
+                # Get values from sliders
+                keyword_weight = self.__windows[9].keywordWeightSlider.value() / 100
+                distance_weight = self.__windows[9].distanceWeightSlider.value() / 100
+                connection_weight = self.__windows[9].connectionWeightSlider.value() / 100
+                
+                # Normalize weights
+                total = keyword_weight + distance_weight + connection_weight
+                if total > 0:
+                    keyword_weight = keyword_weight / total
+                    distance_weight = distance_weight / total
+                    connection_weight = connection_weight / total
+            
             # Use the bridge to process with bitvector optimization
             community_tree = self.community_bridge.process_community_query(
                 self.queryUser[0],
                 queryKeywords,
                 res[0],      # min keywords
                 res[3],      # radius
-                res[2]       # min similarity 
+                res[2],      # min similarity
+                keyword_weight,
+                distance_weight,
+                connection_weight,
+                False        # Don't use tree optimization by default
             )
             
             if not community_tree:
@@ -1863,3 +2097,222 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
     def closeEvent(self, a0: QtGui.QCloseEvent) -> None:
         print("Closed")
         exit(0)
+        
+    # Community search tree methods
+    def pruneTree(self, tree):
+        """
+        Prune branches of the tree that don't have any satisfying users
+        """
+        # Base case: if tree is None or empty
+        if not tree or not tree.get("children"):
+            return tree
+        
+        # Process children
+        for child_id in list(tree["children"].keys()):
+            child = tree["children"][child_id]
+            # Recursively prune the child
+            pruned_child = self.pruneTree(child)
+            
+            # If child is None or has no satisfying users in its subtree, remove it
+            if not pruned_child or (not pruned_child["satisfy"] and not any(c.get("satisfy", False) for c in pruned_child["children"].values())):
+                del tree["children"][child_id]
+            else:
+                tree["children"][child_id] = pruned_child
+        
+        return tree
+
+    def treeUsers(self, tree, result_users=None, pass_users=None):
+        """Extract users from the tree, separating those that satisfy criteria from those that don't"""
+        if result_users is None:
+            result_users = []
+        if pass_users is None:
+            pass_users = []
+            
+        # Process current node
+        if tree["satisfy"]:
+            result_users.append(tree["user"])
+        else:
+            pass_users.append(tree["user"])
+        
+        # Process children recursively
+        for child in tree["children"].values():
+            self.treeUsers(child, result_users, pass_users)
+            
+        return result_users, pass_users
+
+    def kdTree(self, queryKeywords, user, k, dThresh, e, dist, hops, visited):
+        """Build a KD-truss tree for visualization"""
+        if user in visited:
+            return None
+            
+        visited.append(user)
+        userKeywords = self.selectedSocialNetwork.getUserKeywords(user)
+        
+        # Calculate keyword similarity
+        common = set(queryKeywords) & set(userKeywords)
+        dSimilarity = len(common) / max(1, len(set(queryKeywords) | set(userKeywords)))
+        
+        # Check if this user satisfies all criteria
+        satisfy = len(common) >= k and dist <= dThresh and hops <= e
+        
+        # Create node
+        node = {
+            "user": user,
+            "keywords": list(userKeywords),
+            "satisfy": satisfy,
+            "distance": dist,
+            "hops": hops,
+            "children": {}
+        }
+        
+        # Get user's relationships
+        try:
+            user_relations = self.selectedSocialNetwork.getUserRel(user)
+            for rel in user_relations:
+                if not rel:
+                    continue
+                    
+                related_user = rel[0]
+                if related_user not in visited and hops + 1 <= e:
+                    # Calculate distance for this relationship
+                    try:
+                        loc1 = self.selectedSocialNetwork.userLoc(user)
+                        loc2 = self.selectedSocialNetwork.userLoc(related_user)
+                        
+                        if loc1 and loc2:
+                            new_dist = ((float(loc1[0][0]) - float(loc2[0][0]))**2 + 
+                                      (float(loc1[0][1]) - float(loc2[0][1]))**2)**0.5
+                            
+                            # Only include if distance is within threshold
+                            if new_dist <= dThresh:
+                                child = self.kdTree(queryKeywords, related_user, k, dThresh, e, new_dist, hops + 1, visited)
+                                if child:
+                                    node["children"][related_user] = child
+                    except:
+                        pass
+        except:
+            pass
+            
+        return node
+        
+    def communityTree(self, user, queryKeywords, queryRels, k, r, minRel, d, e, visited, hop, deg_sim):
+        """Build a community search tree for visualization"""
+        if user in visited:
+            return None
+            
+        visited.append(user)
+        
+        userKeywords = self.selectedSocialNetwork.getUserKeywords(user)
+        
+        # Calculate keyword similarity
+        common = set(queryKeywords) & set(userKeywords) 
+        if len(common) == 0 and len(queryKeywords) == 0:
+            keyword_similarity = 0
+        else:
+            keyword_similarity = len(common) / max(1, len(set(queryKeywords) | set(userKeywords)))
+        
+        # Check if user is related to query user
+        is_related = user in queryRels
+        
+        # Check if this user satisfies all criteria
+        satisfy = len(common) >= k and (is_related or keyword_similarity >= e)
+        
+        # Create node
+        node = {
+            "user": user,
+            "keywords": list(userKeywords),
+            "satisfy": satisfy,
+            "distance": deg_sim,
+            "hops": hop,
+            "deg_sim": keyword_similarity,
+            "children": {}
+        }
+        
+        # Explore neighbors if within radius
+        if hop < r:
+            try:
+                user_relations = self.selectedSocialNetwork.getUserRel(user)
+                for rel in user_relations:
+                    if not rel:
+                        continue
+                        
+                    related_user = rel[0]
+                    if related_user not in visited:
+                        # Only build subtree for users with minimum relation score
+                        rel_score = 1.0  # Default relation score
+                        
+                        child = self.communityTree(
+                            related_user, queryKeywords, queryRels, k, r, 
+                            minRel, d, e, visited, hop + 1, keyword_similarity
+                        )
+                        if child:
+                            node["children"][related_user] = child
+            except:
+                pass
+                
+        return node
+        
+    def communityTimeTree(self, user, queryKeywords, queryRels, queryPois, startDate, endDate, k, r, minRel, poi, d, e, visited, hop, deg_sim):
+        """Build a time-based community search tree"""
+        if user in visited:
+            return None
+            
+        visited.append(user)
+        
+        userKeywords = self.selectedSocialNetwork.getUserKeywordsInTime(user, startDate, endDate)
+        userPois = self.selectedSocialNetwork.getUserPoiInTime(user, startDate, endDate)
+        
+        # Calculate keyword similarity
+        common = set(queryKeywords) & set(userKeywords) 
+        if len(common) == 0 and len(queryKeywords) == 0:
+            keyword_similarity = 0
+        else:
+            keyword_similarity = len(common) / max(1, len(set(queryKeywords) | set(userKeywords)))
+        
+        # Calculate POI similarity
+        common_pois = set(queryPois) & set(userPois)
+        poi_similarity = len(common_pois) / max(1, max(len(queryPois), len(userPois)))
+        
+        # Check if user is related to query user
+        is_related = user in queryRels
+        
+        # Check if this user satisfies all criteria
+        satisfy = (len(common) >= k and 
+                  (is_related or keyword_similarity >= e) and 
+                  poi_similarity >= poi)
+        
+        # Create node
+        node = {
+            "user": user,
+            "keywords": list(userKeywords),
+            "satisfy": satisfy,
+            "distance": deg_sim,
+            "hops": hop,
+            "deg_sim": keyword_similarity,
+            "children": {}
+        }
+        
+        # Explore neighbors if within radius
+        if hop < r:
+            try:
+                user_relations = self.selectedSocialNetwork.getUserRel(user)
+                for rel in user_relations:
+                    if not rel:
+                        continue
+                        
+                    related_user = rel[0]
+                    if related_user not in visited:
+                        # Only build subtree for users with minimum relation score
+                        rel_score = 1.0  # Default relation score
+                        
+                        child = self.communityTimeTree(
+                            related_user, queryKeywords, queryRels, queryPois,
+                            startDate, endDate, k, r, minRel, poi, d, e, 
+                            visited, hop + 1, keyword_similarity
+                        )
+                        if child:
+                            node["children"][related_user] = child
+            except:
+                pass
+                
+        return node

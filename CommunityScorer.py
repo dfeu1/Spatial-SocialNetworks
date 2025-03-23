@@ -2,13 +2,35 @@ import math
 
 class CommunityScorer:
     """
-    Calculate scores for communities based on keywords (40%), distance (30%), and connections (30%).
-    S(C) = 0.4⋅K(C) + 0.3⋅D(C) + 0.3⋅Conn(C)
+    Calculate scores for communities based on configurable weights for
+    keywords, distance, and connections.
+    Default: S(C) = 0.4⋅K(C) + 0.3⋅D(C) + 0.3⋅Conn(C)
     """
+    
+    def __init__(self, keyword_weight=0.4, distance_weight=0.3, connection_weight=0.3):
+        """
+        Initialize scorer with configurable weights
+        
+        Args:
+            keyword_weight (float): Weight for keyword similarity (default: 0.4)
+            distance_weight (float): Weight for physical distance (default: 0.3)
+            connection_weight (float): Weight for social connections (default: 0.3)
+        """
+        self.keyword_weight = keyword_weight
+        self.distance_weight = distance_weight
+        self.connection_weight = connection_weight
+        
+        # Normalize weights if they don't sum to 1
+        total = self.keyword_weight + self.distance_weight + self.connection_weight
+        if total != 1.0:
+            self.keyword_weight /= total
+            self.distance_weight /= total
+            self.connection_weight /= total
     
     def calculate_community_score(self, community, social_network, road_network):
         """
-        Calculate a score for a community based on keywords (40%), distance (30%), and connections (30%).
+        Calculate a score for a community based on weighted components:
+        keywords, distance, and connections.
         
         Args:
             community (list): List of user IDs in the community
@@ -22,17 +44,19 @@ class CommunityScorer:
         if not community or len(community) < 2:
             return 0, {'keywords': 0, 'distance': 0, 'connections': 0}
             
-        # Calculate keyword similarity score (40%)
+        # Calculate keyword similarity score
         keyword_score = self.calculate_keyword_similarity(community, social_network)
         
-        # Calculate physical distance score (30%)
+        # Calculate physical distance score
         distance_score = self.calculate_distance_score(community, social_network, road_network)
         
-        # Calculate social connection score (30%)
+        # Calculate social connection score
         connection_score = self.calculate_connection_score(community, social_network)
         
-        # Calculate overall score with weights
-        overall_score = 0.4 * keyword_score + 0.3 * distance_score + 0.3 * connection_score
+        # Calculate overall score with configurable weights
+        overall_score = (self.keyword_weight * keyword_score + 
+                         self.distance_weight * distance_score + 
+                         self.connection_weight * connection_score)
         
         component_scores = {
             'keywords': keyword_score,

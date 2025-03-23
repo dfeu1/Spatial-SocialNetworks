@@ -12,19 +12,24 @@ class BitVectorCommunityDetector:
     - Radius-based community detection (r=1 or r=2)
     - Dual pruning strategies: keyword-based and score-based
     - Option to precompute r-radius subgraphs
+    - Configurable scoring weights
+    - BitVector Tree optimization for faster searching
     """
     
-    def __init__(self, social_network, road_network):
+    def __init__(self, social_network, road_network, keyword_weight=0.4, distance_weight=0.3, connection_weight=0.3):
         """
         Initialize the community detector
         
         Args:
             social_network: SocialNetwork object
             road_network: RoadNetwork object
+            keyword_weight: Weight for keyword similarity (default: 0.4)
+            distance_weight: Weight for physical distance (default: 0.3)
+            connection_weight: Weight for social connections (default: 0.3)
         """
         self.social_network = social_network
         self.road_network = road_network
-        self.scorer = CommunityScorer()
+        self.scorer = CommunityScorer(keyword_weight, distance_weight, connection_weight)
         
         # Bitvector system
         self.keyword_map = {}  # Maps keyword ID to bit position
@@ -41,6 +46,10 @@ class BitVectorCommunityDetector:
         # Flag to indicate if precomputation is done
         self.radius1_precomputed = False
         self.radius2_precomputed = False
+        
+        # BitVector Tree for optimization
+        self.bit_vector_tree = None
+        self.tree_built = False
     
     #--------------------------
     # Bitvector functionality
@@ -136,6 +145,144 @@ class BitVectorCommunityDetector:
         except:
             # Return empty bitvector if user has no keywords
             return 0
+    
+    #--------------------------
+    # BitVector Tree Optimization
+    #--------------------------
+    
+    class BitVectorTreeNode:
+        """
+        Node in the bit vector tree.
+        """
+        def __init__(self, bitvector=0, users=None):
+            """
+            Initialize a node
+            
+            Args:
+                bitvector: Bit vector representation
+                users: List of user IDs with this bit vector
+            """
+            self.bitvector = bitvector
+            self.users = users or []
+            self.children = []  # Child nodes with supersets of this bitvector
+    
+    def build_bit_vector_tree(self):
+        """
+        Build a tree structure to organize bit vectors for efficient searching
+        """
+        print("Building BitVector Tree for optimized search...")
+        start_time = time.time()
+        
+        # Get all users
+        users = self.social_network.getUsers()
+        
+        # Initialize the tree with an empty root node
+        self.bit_vector_tree = self.BitVectorTreeNode()
+        
+        # Group users by their bit vectors to avoid duplicates
+        bit_vector_groups = {}
+        
+        for user in users:
+            bitvector = self.get_user_keyword_bitvector(user)
+            if bitvector not in bit_vector_groups:
+                bit_vector_groups[bitvector] = []
+            bit_vector_groups[bitvector].append(user)
+        
+        # Sort bit vectors by number of bits (ascending) for optimal tree structure
+        sorted_bit_vectors = sorted(bit_vector_groups.keys(), 
+                                    key=lambda bv: bin(bv).count('1'))
+        
+        # Insert each group into the tree
+        for bitvector in sorted_bit_vectors:
+            user_group = bit_vector_groups[bitvector]
+            self._insert_into_tree(self.bit_vector_tree, bitvector, user_group)
+        
+        self.tree_built = True
+        
+        elapsed = time.time() - start_time
+        print(f"BitVector Tree built in {elapsed:.2f} seconds with {len(bit_vector_groups)} unique bit vectors")
+    
+    def _insert_into_tree(self, node, bitvector, users):
+        """
+        Insert a bitvector and its users into the tree
+        
+        Args:
+            node: Current tree node
+            bitvector: Bitvector to insert
+            users: List of users with this bitvector
+        """
+        # Check if this bitvector is a superset of the node's bitvector
+        if (node.bitvector & bitvector) == node.bitvector:
+            # Try to insert into a child node
+            for child in node.children:
+                if (child.bitvector & bitvector) == child.bitvector:
+                    self._insert_into_tree(child, bitvector, users)
+                    return
+            
+            # No suitable child found, add a new child
+            new_node = self.BitVectorTreeNode(bitvector, users)
+            node.children.append(new_node)
+            return
+        
+        # Node's bitvector is not a subset, find common bits
+        common_bits = node.bitvector & bitvector
+        
+        if common_bits == 0:
+            # No common bits, create a new child under the root
+            new_node = self.BitVectorTreeNode(bitvector, users)
+            self.bit_vector_tree.children.append(new_node)
+        else:
+            # Create an intermediate node with common bits
+            intermediate = self.BitVectorTreeNode(common_bits)
+            
+            # Move current node's children that are supersets of common_bits
+            for child in list(node.children):
+                if (child.bitvector & common_bits) == common_bits:
+                    intermediate.children.append(child)
+                    node.children.remove(child)
+            
+            # Add the new node as a child of the intermediate node
+            new_node = self.BitVectorTreeNode(bitvector, users)
+            intermediate.children.append(new_node)
+            
+            # Add intermediate node as a child of the current node
+            node.children.append(intermediate)
+    
+    def search_bit_vector_tree(self, query_bitvector):
+        """
+        Search the bit vector tree for users matching a query
+        
+        Args:
+            query_bitvector: Query bit vector
+            
+        Returns:
+            list: Matching users
+        """
+        if not self.tree_built or not self.bit_vector_tree:
+            return []
+        
+        matching_users = []
+        self._search_tree_node(self.bit_vector_tree, query_bitvector, matching_users)
+        return matching_users
+    
+    def _search_tree_node(self, node, query_bitvector, matching_users):
+        """
+        Recursively search a tree node for matching users
+        
+        Args:
+            node: Current node
+            query_bitvector: Query bit vector
+            matching_users: List to collect matching users
+        """
+        # Check if this node's bitvector contains all query keywords
+        if self.has_all_keywords(node.bitvector, query_bitvector):
+            matching_users.extend(node.users)
+        
+        # Only search children that could possibly match
+        for child in node.children:
+            # Check if there's any chance this branch could match
+            if (child.bitvector & query_bitvector) == query_bitvector:
+                self._search_tree_node(child, query_bitvector, matching_users)
     
     #--------------------------
     # Subgraph computation
@@ -249,7 +396,8 @@ class BitVectorCommunityDetector:
     # Community detection
     #--------------------------
     
-    def find_top_k_communities(self, query_keywords, k=5, radius=2, min_similarity=0.01, use_precomputation=True):
+    def find_top_k_communities(self, query_keywords, k=5, radius=2, min_similarity=0.01, 
+                             use_precomputation=True, use_tree_optimization=False):
         """
         Find top-k communities with dual pruning strategies
         
@@ -259,6 +407,7 @@ class BitVectorCommunityDetector:
             radius: Radius parameter (1 or 2)
             min_similarity: Minimum similarity threshold
             use_precomputation: Whether to use precomputed subgraphs if available
+            use_tree_optimization: Whether to use bit vector tree for optimization
             
         Returns:
             list: Top-k communities with scores
@@ -273,6 +422,18 @@ class BitVectorCommunityDetector:
         
         # Get all users
         users = self.social_network.getUsers()
+        
+        # Use BitVector Tree optimization if requested
+        if use_tree_optimization:
+            if not self.tree_built:
+                self.build_bit_vector_tree()
+            
+            # Use tree to find users matching the query
+            tree_results = self.search_bit_vector_tree(query_bitvector)
+            
+            if tree_results:
+                print(f"BitVector Tree optimization found {len(tree_results)} candidates")
+                users = tree_results
         
         # Check if we have precomputed subgraphs
         use_precomp = use_precomputation and (
@@ -491,12 +652,21 @@ def example_usage():
     social_network = None  # Replace with your SocialNetwork instance
     road_network = None    # Replace with your RoadNetwork instance
     
-    # Create detector
-    detector = BitVectorCommunityDetector(social_network, road_network)
+    # Create detector with custom scoring weights
+    detector = BitVectorCommunityDetector(
+        social_network, 
+        road_network,
+        keyword_weight=0.5,    # More emphasis on keywords
+        distance_weight=0.3,   # Default distance weight
+        connection_weight=0.2  # Less emphasis on connections
+    )
     
     # Optional: Precompute r-radius subgraphs for faster queries
     detector.precompute_radius_subgraphs(radius=1)
     detector.precompute_radius_subgraphs(radius=2)
+    
+    # Optional: Build bit vector tree for optimization
+    detector.build_bit_vector_tree()
     
     # Find top-k communities
     query_keywords = ["coffee", "travel", "food"]
@@ -505,7 +675,8 @@ def example_usage():
         k=5,                   # Number of communities to return
         radius=2,              # Radius parameter (1 or 2)
         min_similarity=0.01,   # Minimum similarity threshold
-        use_precomputation=True  # Use precomputed subgraphs if available
+        use_precomputation=True,  # Use precomputed subgraphs if available
+        use_tree_optimization=True  # Use bit vector tree optimization
     )
     
     # Print results

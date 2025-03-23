@@ -27,7 +27,8 @@ class CommunityBridge:
         if not hasattr(self.gui, 'communityDetector') or not self.gui.communityDetector:
             self.gui.initializeCommunityDetector()
     
-    def process_community_query(self, query_user, query_keywords, min_keywords, radius, min_similarity):
+    def process_community_query(self, query_user, query_keywords, min_keywords, radius, min_similarity, 
+                               keyword_weight=0.4, distance_weight=0.3, connection_weight=0.3, use_tree=False):
         """
         Process a community query using the BitVector implementation
         
@@ -37,6 +38,10 @@ class CommunityBridge:
             min_keywords: Minimum number of keywords (k parameter) 
             radius: Radius parameter (r)
             min_similarity: Minimum similarity threshold
+            keyword_weight: Weight for keyword similarity (default: 0.4)
+            distance_weight: Weight for physical distance (default: 0.3)
+            connection_weight: Weight for social connections (default: 0.3)
+            use_tree: Whether to use BitVector Tree optimization
             
         Returns:
             Community tree structure or None if no results
@@ -56,13 +61,21 @@ class CommunityBridge:
         # Cap radius to 1 or 2 (supported values)
         radius = min(2, max(1, radius))
         
+        # Update scoring weights
+        self.gui.communityDetector.scorer = CommunityScorer(
+            keyword_weight=keyword_weight, 
+            distance_weight=distance_weight,
+            connection_weight=connection_weight
+        )
+        
         # Get communities using BitVector implementation
         communities = self.gui.communityDetector.find_top_k_communities(
             query_keywords,
             k=5,  # Default to top 5 communities
             radius=int(radius),
             min_similarity=min_similarity,
-            use_precomputation=hasattr(self.gui, 'precomputed') and self.gui.precomputed
+            use_precomputation=hasattr(self.gui, 'precomputed') and self.gui.precomputed,
+            use_tree_optimization=use_tree
         )
         
         if not communities:
@@ -81,5 +94,12 @@ class CommunityBridge:
         
         # Store the communities for later access
         self.gui.current_communities = communities
+        
+        # Store scoring weights for visualization
+        self.gui.current_scoring_weights = {
+            'keyword': keyword_weight,
+            'distance': distance_weight,
+            'connection': connection_weight
+        }
         
         return tree
