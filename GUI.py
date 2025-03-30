@@ -215,15 +215,6 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
 
     def __bitvectorCommunitySearch(self):
         """Open dialog for community search with bit vector optimization"""
-        # Check if a query user is selected
-        if self.queryUser is None:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Query User Required",
-                "Please select a query user first."
-            )
-            return
-            
         # Create dialog if it doesn't exist
         if not hasattr(self, 'bitvectorDialog') or self.__windows.get(9) is None:
             self.__windows[9] = QtWidgets.QDialog(self)
@@ -237,20 +228,79 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             # Form layout for inputs
             form = QtWidgets.QFormLayout()
             
+            # Query mode selection
+            self.__windows[9].queryModeGroup = QtWidgets.QGroupBox("Query Mode")
+            queryModeLayout = QtWidgets.QVBoxLayout()
+            
+            # Radio buttons for query mode
+            self.__windows[9].userModeRadio = QtWidgets.QRadioButton("Use Selected User")
+            self.__windows[9].keywordModeRadio = QtWidgets.QRadioButton("Enter Keywords Directly")
+            
+            # Set default mode based on whether a user is selected
+            if self.queryUser is not None:
+                self.__windows[9].userModeRadio.setChecked(True)
+            else:
+                self.__windows[9].keywordModeRadio.setChecked(True)
+            
+            queryModeLayout.addWidget(self.__windows[9].userModeRadio)
+            queryModeLayout.addWidget(self.__windows[9].keywordModeRadio)
+            self.__windows[9].queryModeGroup.setLayout(queryModeLayout)
+            form.addRow(self.__windows[9].queryModeGroup)
+            
+            # User mode widgets
+            self.__windows[9].userModeWidget = QtWidgets.QWidget()
+            userModeLayout = QtWidgets.QVBoxLayout(self.__windows[9].userModeWidget)
+            userModeLayout.setContentsMargins(0, 0, 0, 0)
+            
             # Query user information display
-            self.__windows[9].queryUserLabel = QtWidgets.QLabel(f"Query User: {self.queryUser[0]}")
-            self.__windows[9].queryUserLabel.setStyleSheet("font-weight: bold;")
-            form.addRow(self.__windows[9].queryUserLabel)
+            if self.queryUser is not None:
+                self.__windows[9].queryUserLabel = QtWidgets.QLabel(f"Query User: {self.queryUser[0]}")
+                self.__windows[9].queryUserLabel.setStyleSheet("font-weight: bold;")
+                userModeLayout.addWidget(self.__windows[9].queryUserLabel)
+                
+                # Keywords display (read-only)
+                query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
+                keywords_text = ", ".join([self.selectedSocialNetwork.getKeywordByID(k) for k in query_keywords])
+                
+                self.__windows[9].keywordsDisplay = QtWidgets.QTextEdit()
+                self.__windows[9].keywordsDisplay.setText(keywords_text)
+                self.__windows[9].keywordsDisplay.setReadOnly(True)
+                self.__windows[9].keywordsDisplay.setMaximumHeight(60)
+                userModeLayout.addWidget(QtWidgets.QLabel("User's Keywords:"))
+                userModeLayout.addWidget(self.__windows[9].keywordsDisplay)
+            else:
+                self.__windows[9].queryUserLabel = QtWidgets.QLabel("No user selected")
+                self.__windows[9].queryUserLabel.setStyleSheet("font-weight: bold; color: red;")
+                userModeLayout.addWidget(self.__windows[9].queryUserLabel)
             
-            # Keywords display (read-only)
-            query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
-            keywords_text = ", ".join([self.selectedSocialNetwork.getKeywordByID(k) for k in query_keywords])
+            form.addRow("User Info:", self.__windows[9].userModeWidget)
             
-            self.__windows[9].keywordsDisplay = QtWidgets.QTextEdit()
-            self.__windows[9].keywordsDisplay.setText(keywords_text)
-            self.__windows[9].keywordsDisplay.setReadOnly(True)
-            self.__windows[9].keywordsDisplay.setMaximumHeight(60)
-            form.addRow("Keywords:", self.__windows[9].keywordsDisplay)
+            # Keyword mode widgets
+            self.__windows[9].keywordModeWidget = QtWidgets.QWidget()
+            keywordModeLayout = QtWidgets.QVBoxLayout(self.__windows[9].keywordModeWidget)
+            keywordModeLayout.setContentsMargins(0, 0, 0, 0)
+            
+            # Direct keyword input
+            keywordModeLayout.addWidget(QtWidgets.QLabel("Enter keywords separated by commas:"))
+            self.__windows[9].keywordInput = QtWidgets.QTextEdit()
+            self.__windows[9].keywordInput.setMaximumHeight(60)
+            self.__windows[9].keywordInput.setPlaceholderText("e.g., selfie, love, nature, techie")
+            keywordModeLayout.addWidget(self.__windows[9].keywordInput)
+            
+            # Add keyword lookup button
+            self.__windows[9].keywordLookupBtn = QtWidgets.QPushButton("Lookup Keywords")
+            self.__windows[9].keywordLookupBtn.clicked.connect(self.lookupKeywords)
+            keywordModeLayout.addWidget(self.__windows[9].keywordLookupBtn)
+            
+            form.addRow("Direct Input:", self.__windows[9].keywordModeWidget)
+            
+            # Connect radio buttons to show/hide appropriate widgets
+            def updateQueryMode():
+                self.__windows[9].userModeWidget.setVisible(self.__windows[9].userModeRadio.isChecked())
+                self.__windows[9].keywordModeWidget.setVisible(self.__windows[9].keywordModeRadio.isChecked())
+            
+            self.__windows[9].userModeRadio.toggled.connect(updateQueryMode)
+            updateQueryMode()
             
             # Top-K communities input
             self.__windows[9].topKInput = QtWidgets.QSpinBox()
@@ -271,12 +321,10 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             self.__windows[9].minSimInput.setValue(0.01)
             form.addRow("Minimum Similarity:", self.__windows[9].minSimInput)
             
-            # Add section header for scoring weights
             scoring_header = QtWidgets.QLabel("Scoring Weights")
             scoring_header.setStyleSheet("font-weight: bold; margin-top: 10px;")
             form.addRow(scoring_header)
             
-            # Create a helper function for creating weight sliders
             def create_weight_slider(default_value=0.33):
                 slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
                 slider.setRange(1, 100)
@@ -284,10 +332,8 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
                 slider.setTickInterval(10)
                 
-                # Create label to show current value
                 value_label = QtWidgets.QLabel(f"{default_value:.2f}")
                 
-                # Update label when slider changes
                 slider.valueChanged.connect(lambda v: value_label.setText(f"{v/100:.2f}"))
                 
                 # Create layout for slider and label
@@ -389,12 +435,25 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             layout.addWidget(self.__windows[9].statusLabel)
             layout.addLayout(buttonBox)
         else:
-            # Update query user and keywords info if dialog already exists
-            self.__windows[9].queryUserLabel.setText(f"Query User: {self.queryUser[0]}")
-            
-            query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
-            keywords_text = ", ".join([self.selectedSocialNetwork.getKeywordByID(k) for k in query_keywords])
-            self.__windows[9].keywordsDisplay.setText(keywords_text)
+            if hasattr(self.__windows[9], 'userModeRadio'):
+                if self.queryUser is not None:
+                    self.__windows[9].queryUserLabel.setText(f"Query User: {self.queryUser[0]}")
+                    self.__windows[9].queryUserLabel.setStyleSheet("font-weight: bold;")
+                    
+                    query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
+                    keywords_text = ", ".join([self.selectedSocialNetwork.getKeywordByID(k) for k in query_keywords])
+                    self.__windows[9].keywordsDisplay.setText(keywords_text)
+                    
+                    # Enable user mode if a user is selected
+                    self.__windows[9].userModeRadio.setEnabled(True)
+                    self.__windows[9].userModeRadio.setChecked(True)
+                else:
+                    self.__windows[9].queryUserLabel.setText("No user selected")
+                    self.__windows[9].queryUserLabel.setStyleSheet("font-weight: bold; color: red;")
+                    
+                    # Disable user mode if no user is selected
+                    self.__windows[9].userModeRadio.setEnabled(False)
+                    self.__windows[9].keywordModeRadio.setChecked(True)
         
         # Update precomputation checkbox state
         self.__windows[9].precompCheck.setChecked(self.precomputed)
@@ -414,6 +473,100 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         # Show dialog
         self.__windows[9].show()
+        
+    def lookupKeywords(self):
+        """Show available keywords in the system for reference and allow selection"""
+        if not self.selectedSocialNetwork:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Social Network Required",
+                "Please select a social network first."
+            )
+            return
+            
+        # Create a dialog to display available keywords
+        keywordDialog = QtWidgets.QDialog(self)
+        keywordDialog.setWindowTitle("Available Keywords")
+        keywordDialog.setWindowModality(QtCore.Qt.ApplicationModal)
+        keywordDialog.resize(400, 500)
+        
+        # Main layout
+        layout = QtWidgets.QVBoxLayout(keywordDialog)
+        
+        # Get all keywords from the keyword map
+        all_keywords = {}
+        for keyword_id, keyword in self.selectedSocialNetwork._SocialNetwork__keywordMap.items():
+            all_keywords[keyword] = keyword_id
+        
+        # Create a list widget to display keywords
+        keywordList = QtWidgets.QListWidget()
+        keywordList.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        for keyword in sorted(all_keywords.keys()):
+            keywordList.addItem(f"{keyword} (ID: {all_keywords[keyword]})")
+        
+        # Add search box
+        searchBox = QtWidgets.QLineEdit()
+        searchBox.setPlaceholderText("Search keywords...")
+        
+        def filterKeywords():
+            search_text = searchBox.text().lower()
+            for i in range(keywordList.count()):
+                item = keywordList.item(i)
+                item.setHidden(search_text not in item.text().lower())
+        
+        searchBox.textChanged.connect(filterKeywords)
+        
+        # Function to add selected keyword on double-click
+        def addKeywordOnDoubleClick(item):
+            keyword_text = item.text().split(" (ID:")[0]
+            current_text = self.__windows[9].keywordInput.toPlainText().strip()
+            
+            if current_text:
+                # Add comma if there's already text
+                self.__windows[9].keywordInput.setPlainText(f"{current_text}, {keyword_text}")
+            else:
+                self.__windows[9].keywordInput.setPlainText(keyword_text)
+        
+        keywordList.itemDoubleClicked.connect(addKeywordOnDoubleClick)
+        
+        # Add widgets to layout
+        layout.addWidget(QtWidgets.QLabel("Search:"))
+        layout.addWidget(searchBox)
+        layout.addWidget(QtWidgets.QLabel(f"Available Keywords ({len(all_keywords)}):"))
+        layout.addWidget(QtWidgets.QLabel("Double-click to add a keyword or select multiple and click OK"))
+        layout.addWidget(keywordList)
+        
+        # Add buttons
+        buttonBox = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok)
+        
+        # Function to add selected keywords when OK is clicked
+        def addSelectedKeywords():
+            selected_items = keywordList.selectedItems()
+            if selected_items:
+                selected_keywords = [item.text().split(" (ID:")[0] for item in selected_items]
+                current_text = self.__windows[9].keywordInput.toPlainText().strip()
+                
+                if current_text:
+                    # Add comma if there's already text
+                    new_text = current_text + ", " + ", ".join(selected_keywords)
+                else:
+                    new_text = ", ".join(selected_keywords)
+                    
+                self.__windows[9].keywordInput.setPlainText(new_text)
+            
+            keywordDialog.accept()
+        
+        # Safely disconnect the signal using try-except to handle the case when there are no connections
+        try:
+            buttonBox.accepted.disconnect()
+        except TypeError:
+            # No connections to disconnect, which is fine
+            pass
+        buttonBox.accepted.connect(addSelectedKeywords)
+        layout.addWidget(buttonBox)
+        
+        # Show dialog
+        keywordDialog.exec_()
 
     def buildBitVectorTree(self):
         """Build bit vector tree for optimization"""
@@ -494,15 +647,78 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 )
                 return
         
-        # Get query user's keywords
-        query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
-        if not query_keywords:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "No Keywords Found",
-                "The selected query user has no keywords."
-            )
-            return
+        # Determine which mode is active and get keywords accordingly
+        if hasattr(self.__windows[9], 'userModeRadio') and self.__windows[9].userModeRadio.isChecked():
+            # User mode - get keywords from selected user
+            if self.queryUser is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Query User Required",
+                    "Please select a query user or switch to direct keyword input mode."
+                )
+                return
+                
+            query_keywords = self.selectedSocialNetwork.getUserKeywords(self.queryUser[0])
+            if not query_keywords:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "No Keywords Found",
+                    "The selected query user has no keywords."
+                )
+                return
+        else:
+            # Keyword mode - get keywords from text input
+            keyword_text = self.__windows[9].keywordInput.toPlainText().strip()
+            if not keyword_text:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "No Keywords Entered",
+                    "Please enter at least one keyword."
+                )
+                return
+                
+            # Parse keywords and convert to keyword IDs
+            keyword_names = [k.strip() for k in keyword_text.split(',') if k.strip()]
+            query_keywords = []
+            invalid_keywords = []
+            
+            # Convert keyword names to IDs using the reverse map
+            for keyword in keyword_names:
+                keyword_id = None
+                # Try to find the keyword in the reverse map
+                for k_id, k_name in self.selectedSocialNetwork._SocialNetwork__keywordMap.items():
+                    if k_name.lower() == keyword.lower():
+                        keyword_id = k_id
+                        break
+                
+                if keyword_id:
+                    query_keywords.append(keyword_id)
+                else:
+                    invalid_keywords.append(keyword)
+            
+            # Check if we have any valid keywords
+            if not query_keywords:
+                if invalid_keywords:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Invalid Keywords",
+                        f"None of the entered keywords were found in the system. Invalid keywords: {', '.join(invalid_keywords)}"
+                    )
+                else:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "No Keywords Entered",
+                        "Please enter at least one keyword."
+                    )
+                return
+            
+            # Warn about invalid keywords but continue with valid ones
+            if invalid_keywords:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Some Invalid Keywords",
+                    f"The following keywords were not found and will be ignored: {', '.join(invalid_keywords)}"
+                )
         
         # Get parameters
         top_k = self.__windows[9].topKInput.value()
