@@ -133,9 +133,16 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
 
     # Creates the plot widgets. suffix is used when a summary graph is created, for example
     def createPlots(self, suffix=""):
+        # Create a layout with two columns of equal width
+        self.win.ci.layout.setColumnStretchFactor(0, 1)
+        self.win.ci.layout.setColumnStretchFactor(1, 1)
+        
+        # Add social network plot to the left column
+        self.socialGraphWidget = self.win.addPlot(row=0, col=0, title=f"Social Network {suffix}")
+        
+        # Add road network plot to the right column
         self.roadGraphWidget = self.win.addPlot(row=0, col=1, title=f"Road Network {suffix}")
         self.roadGraphWidget.scene().sigMouseClicked.connect(self.roadGraphClick)
-        self.socialGraphWidget = self.win.addPlot(row=0, col=0, title=f"Social Network {suffix}")
         #self.linkGraphAxis()
 
     def roadGraphClick(self, event):
@@ -143,10 +150,12 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         cords = event.scenePos()
         if self.roadGraphWidget.sceneBoundingRect().contains(cords):
             point = vb.mapSceneToView(cords)
-            tree = spatial.KDTree(self.centers)
-            closest_point = tree.query([[point.x(), point.y()]])[1][0]
-            ui = UserUI(self, self.__windows[7])
-            ui.showClusterUsers(self.selectedSocialNetwork.getClusterUsers(self.ids[closest_point]))
+            if len(self.centers) > 0:
+                centers_array = [[x, y] for x, y in self.centers]
+                tree = spatial.KDTree(centers_array)
+                closest_point = tree.query([[point.x(), point.y()]])[1][0]
+                ui = UserUI(self, self.__windows[7])
+                ui.showClusterUsers(self.selectedSocialNetwork.getClusterUsers(self.ids[closest_point]))
 
     def createSumPlot(self, suffix=None):
         self.roadGraphWidget = self.win.addPlot(row=0, col=1, title=f"Road Network {suffix}")
@@ -334,7 +343,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 
                 value_label = QtWidgets.QLabel(f"{default_value:.2f}")
                 
-                slider.valueChanged.connect(lambda v: value_label.setText(f"{v/100:.2f}"))
+                slider.valueChanged.connect(lambda v: value_label.setText(f"{v}%"))
                 
                 # Create layout for slider and label
                 slider_layout = QtWidgets.QHBoxLayout()
@@ -589,13 +598,78 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         # Build tree
         try:
             self.communityDetector.build_bit_vector_tree()
-            self.__windows[9].statusLabel.setText("BitVector Tree built successfully!")
+            # Automatically save tree to tree.json
+            self.communityDetector.save_tree('tree.json')
+            self.__windows[9].statusLabel.setText("BitVector Tree built and saved successfully!")
         except Exception as e:
             self.__windows[9].statusLabel.setText(f"Error: {str(e)}")
         
         # Re-enable buttons
         self.__windows[9].buildTreeBtn.setEnabled(True)
         self.__windows[9].searchBtn.setEnabled(True)
+
+    def saveTreeToFile(self):
+        """Save BitVector tree to a user-specified file"""
+        if not self.communityDetector or not self.communityDetector.tree_built:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Tree Not Built",
+                "Please build the BitVector tree first."
+            )
+            return
+
+        # Open file dialog
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save BitVector Tree",
+            "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+
+        if file_path:
+            try:
+                self.communityDetector.save_tree(file_path)
+                self.__windows[9].statusLabel.setText(f"Tree saved successfully to {file_path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Save Error",
+                    f"Failed to save tree: {str(e)}"
+                )
+
+    def loadTreeFromFile(self):
+        """Load BitVector tree from a user-specified file"""
+        # Open file dialog
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load BitVector Tree",
+            "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+
+        if file_path:
+            try:
+                if not self.communityDetector:
+                    if not self.initializeCommunityDetector():
+                        return
+
+                success = self.communityDetector.load_tree(file_path)
+                if success:
+                    self.__windows[9].statusLabel.setText(f"Tree loaded successfully from {file_path}")
+                    self.__windows[9].saveTreeBtn.setEnabled(True)
+                    self.__windows[9].treeOptCheck.setChecked(True)
+                else:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Load Failed",
+                        "Failed to load the tree file. The file may be corrupted or invalid."
+                    )
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Load Error",
+                    f"Failed to load tree: {str(e)}"
+                )
 
     def precomputeSubgraphs(self):
         """Precompute subgraphs for faster community detection"""
@@ -832,8 +906,8 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         for i, community in enumerate(communities):
             color_idx = i % len(community_colors)
             color = community_colors[color_idx]
-        
-            # Plot community members
+            
+            # Plot regular community members
             x = []
             y = []
             for user in community['users']:
@@ -843,20 +917,23 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                     y.append(float(user_location[0][1]))
                 except:
                     continue
-        
+            
             if x and y:
+                # Plot regular members as circles
                 self.roadGraphWidget.plot(x, y, pen=None, symbol='o', symbolSize=10,
                                     symbolPen=(*color, 100), 
                                     symbolBrush=(*color, 175))
-        
-            # Highlight center user with star
-            try:
-                center_loc = self.selectedSocialNetwork.userLoc(community['center'])
-                self.roadGraphWidget.plot([float(center_loc[0][0])], [float(center_loc[0][1])], 
-                               pen=None, symbol='star', symbolSize=30,
-                               symbolPen=(*color, 255), symbolBrush=(*color, 255))
-            except:
-                pass
+                
+                # Plot center user as a star if it exists
+                if 'center' in community:
+                    try:
+                        center_loc = self.selectedSocialNetwork.userLoc(community['center'])
+                        self.roadGraphWidget.plot([float(center_loc[0][0])], [float(center_loc[0][1])],
+                                            pen=None, symbol='star', symbolSize=30,
+                                            symbolPen=(*color, 255),
+                                            symbolBrush=(*color, 255))
+                    except:
+                        pass
         
         # Create network graph for visualization of top community
         top_community = communities[0]
@@ -938,6 +1015,9 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             print(f"Error loading the network visualization: {str(e)}")
             # Fallback to empty view
             self.socialNetWidget.setHtml("<html><body><h2>Network visualization could not be loaded</h2></body></html>")
+        
+        # Add the social network widget to the layout
+        self.layout.addWidget(self.socialNetWidget, 0, 0, 1, 1)
         
         # Schedule a reload after a short delay to ensure proper rendering
         QTimer.singleShot(500, self.socialNetWidget.reload)
@@ -1024,7 +1104,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         # Add table to the left panel (set to expand vertically to fill all space)
         left_layout.addWidget(communities_table, 1)  # 1 means stretch factor, makes it expand to fill space
         
-        # Right section (contains map and score)
+        # Right section (contains map, social network, and score)
         right_panel = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -1046,8 +1126,20 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         # Add the toolbar to the top of the right panel
         right_layout.addWidget(toolbar_widget)
         
-        # Add map to the right panel
-        right_layout.addWidget(self.win, 3)  # Top section takes 3/4 of height
+        # Create a widget for the visualizations
+        viz_widget = QtWidgets.QWidget()
+        viz_layout = QtWidgets.QHBoxLayout(viz_widget)
+        viz_layout.setContentsMargins(0, 0, 0, 0)
+        viz_layout.setSpacing(0)
+        
+        # Add social network visualization to the left side
+        viz_layout.addWidget(self.socialNetWidget)
+        
+        # Add road map to the right side
+        viz_layout.addWidget(self.win)
+        
+        # Add the visualization widget to the right panel
+        right_layout.addWidget(viz_widget, 3)  # Top section takes 3/4 of height
         
         # Add score information
         score_widget = QtWidgets.QWidget()
@@ -1088,7 +1180,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         keywords_bar.setObjectName("keywords_bar")
         keywords_bar.setRange(0, 100)
         keywords_bar.setValue(int(components['keywords'] * 100))
-        keywords_bar.setFormat(f"{components['keywords']:.2f}")
+        keywords_bar.setFormat(f"{components['keywords']*100:.1f}%")
         keywords_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
         keywords_layout.addWidget(keywords_bar)
         score_layout.addLayout(keywords_layout)
@@ -1103,7 +1195,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         distance_bar.setObjectName("distance_bar")
         distance_bar.setRange(0, 100)
         distance_bar.setValue(int(components['distance'] * 100))
-        distance_bar.setFormat(f"{components['distance']:.2f}")
+        distance_bar.setFormat(f"{components['distance']*100:.1f}%")
         distance_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
         distance_layout.addWidget(distance_bar)
         score_layout.addLayout(distance_layout)
@@ -1118,7 +1210,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         connections_bar.setObjectName("connections_bar")
         connections_bar.setRange(0, 100)
         connections_bar.setValue(int(components['connections'] * 100))
-        connections_bar.setFormat(f"{components['connections']:.2f}")
+        connections_bar.setFormat(f"{components['connections']*100:.1f}%")
         connections_bar.setStyleSheet("QProgressBar { text-align: center; background-color: #444; border: none; color: white; } QProgressBar::chunk { background-color: #3498db; }")
         connections_layout.addWidget(connections_bar)
         score_layout.addLayout(connections_layout)
@@ -1610,14 +1702,31 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             #self.visualizeSummaryData(self.ids, self.centers, sizes, relations, popSize)
 
             
-            x = []
-            y = []
+            # Plot community members
+            member_x = []
+            member_y = []
+            center_x = []
+            center_y = []
+            
+            # First identify community centers and members
             for user in result_users:
                 user_location = self.selectedSocialNetwork.userLoc(user)
-                x.append(float(user_location[0][0]))
-                y.append(float(user_location[0][1]))
-            self.roadGraphWidget.plot(x, y, pen=None, symbol='o', symbolSize=10,
+                if user in pass_users:  # Community centers
+                    center_x.append(float(user_location[0][0]))
+                    center_y.append(float(user_location[0][1]))
+                else:  # Regular community members
+                    member_x.append(float(user_location[0][0]))
+                    member_y.append(float(user_location[0][1]))
+            
+            # Plot regular community members as circles
+            if member_x:
+                self.roadGraphWidget.plot(member_x, member_y, pen=None, symbol='o', symbolSize=10,
                                           symbolPen=(50, 50, 200, 100), symbolBrush=(50, 50, 200, 175))
+            
+            # Plot community centers as stars
+            if center_x:
+                self.roadGraphWidget.plot(center_x, center_y, pen=None, symbol='star', symbolSize=20,
+                                          symbolPen=(200, 50, 50, 200), symbolBrush=(200, 50, 50, 175))
             #self.setQueryUser(qu)
                 #network.add_edge(self.queryUser[0], user, color='red')
             #self.plotQueryUser()
@@ -1678,14 +1787,31 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             #self.visualizeSummaryData(self.ids, self.centers, sizes, relations, popSize)
 
             
-            x = []
-            y = []
+            # Plot community members
+            member_x = []
+            member_y = []
+            center_x = []
+            center_y = []
+            
+            # First identify community centers and members
             for user in result_users:
                 user_location = self.selectedSocialNetwork.userLoc(user)
-                x.append(float(user_location[0][0]))
-                y.append(float(user_location[0][1]))
-            self.roadGraphWidget.plot(x, y, pen=None, symbol='o', symbolSize=10,
+                if user in pass_users:  # Community centers
+                    center_x.append(float(user_location[0][0]))
+                    center_y.append(float(user_location[0][1]))
+                else:  # Regular community members
+                    member_x.append(float(user_location[0][0]))
+                    member_y.append(float(user_location[0][1]))
+            
+            # Plot regular community members as circles
+            if member_x:
+                self.roadGraphWidget.plot(member_x, member_y, pen=None, symbol='o', symbolSize=10,
                                           symbolPen=(50, 50, 200, 100), symbolBrush=(50, 50, 200, 175))
+            
+            # Plot community centers as stars
+            if center_x:
+                self.roadGraphWidget.plot(center_x, center_y, pen=None, symbol='star', symbolSize=20,
+                                          symbolPen=(200, 50, 50, 200), symbolBrush=(200, 50, 50, 175))
             #self.setQueryUser(qu)
                 #network.add_edge(self.queryUser[0], user, color='red')
             #self.plotQueryUser()

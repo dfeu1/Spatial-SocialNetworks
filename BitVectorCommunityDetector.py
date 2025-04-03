@@ -1,8 +1,9 @@
 import math
 import heapq
 import time
+import json
 from CommunityScorer import CommunityScorer
-
+import os
 class BitVectorCommunityDetector:
     """
     Community detection with bitvector optimization for keywords and dual pruning strategies.
@@ -166,10 +167,102 @@ class BitVectorCommunityDetector:
             self.users = users or []
             self.children = []  # Child nodes with supersets of this bitvector
     
-    def build_bit_vector_tree(self):
+    def _serialize_node(self, node):
+        """Serialize a BitVectorTreeNode to a dictionary
+        
+        Args:
+            node: BitVectorTreeNode instance
+            
+        Returns:
+            dict: Serialized node data
+        """
+        if node is None:
+            return None
+            
+        return {
+            'bitvector': node.bitvector,
+            'users': node.users,
+            'children': [self._serialize_node(child) for child in node.children]
+        }
+    
+    def _deserialize_node(self, data):
+        """Deserialize a dictionary to a BitVectorTreeNode
+        
+        Args:
+            data: Dictionary containing node data
+            
+        Returns:
+            BitVectorTreeNode: Deserialized node
+        """
+        if data is None:
+            return None
+            
+        node = self.BitVectorTreeNode(data['bitvector'], data['users'])
+        node.children = [self._deserialize_node(child) for child in data['children']]
+        return node
+    
+    def save_tree(self, filepath):
+        """Save BitVector tree to a JSON file
+        
+        Args:
+            filepath: Path to save the JSON file
+        """
+        if not self.tree_built:
+            raise ValueError("Tree must be built before saving")
+            
+        tree_data = {
+            'keyword_map': self.keyword_map,
+            'reverse_map': {str(k): v for k, v in self.reverse_map.items()},  # Convert int keys to str for JSON
+            'next_position': self.next_position,
+            'tree': self._serialize_node(self.bit_vector_tree)
+        }
+        
+        with open(filepath, 'w') as f:
+            json.dump(tree_data, f)
+    
+    def load_tree(self, filepath):
+        """Load BitVector tree from a JSON file
+        
+        Args:
+            filepath: Path to the JSON file
+            
+        Returns:
+            bool: True if successfully loaded, False otherwise
+        """
+        if not os.path.exists(filepath):
+            return False
+            
+        try:
+            with open(filepath, 'r') as f:
+                tree_data = json.load(f)
+                
+            self.keyword_map = tree_data['keyword_map']
+            self.reverse_map = {int(k): v for k, v in tree_data['reverse_map'].items()}  # Convert str keys back to int
+            self.next_position = tree_data['next_position']
+            self.bit_vector_tree = self._deserialize_node(tree_data['tree'])
+            self.tree_built = True
+            return True
+        except Exception as e:
+            print(f"Error loading tree: {str(e)}")
+            return False
+    
+    def build_bit_vector_tree(self, force_rebuild=False):
         """
         Build a tree structure to organize bit vectors for efficient searching
+        
+        Args:
+            force_rebuild: If True, rebuild the tree even if a cached version exists
         """
+        tree_cache_path = 'bitvector_tree_cache.json'
+        
+        # Try to load cached tree if not forcing rebuild
+        if not force_rebuild and os.path.exists(tree_cache_path):
+            print("Attempting to load cached BitVector Tree...")
+            if self.load_tree(tree_cache_path):
+                print("Successfully loaded cached BitVector Tree")
+                return
+            print("Failed to load cached tree, building new one...")
+        
         print("Building BitVector Tree for optimized search...")
         start_time = time.time()
         
@@ -198,6 +291,14 @@ class BitVectorCommunityDetector:
             self._insert_into_tree(self.bit_vector_tree, bitvector, user_group)
         
         self.tree_built = True
+        
+        # Save the tree to cache
+        try:
+            self.save_tree(tree_cache_path)
+            print(f"BitVector Tree cached to {tree_cache_path}")
+        except Exception as e:
+            print(f"Failed to cache BitVector Tree: {str(e)}")
+
         
         elapsed = time.time() - start_time
         print(f"BitVector Tree built in {elapsed:.2f} seconds with {len(bit_vector_groups)} unique bit vectors")
