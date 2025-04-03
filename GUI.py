@@ -1,4 +1,5 @@
 from collections import Counter
+import os
 from os.path import exists
 from os import getenv
 import random
@@ -139,11 +140,23 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         # Add social network plot to the left column
         self.socialGraphWidget = self.win.addPlot(row=0, col=0, title=f"Social Network {suffix}")
+        self.socialGraphWidget.setAspectLocked(True)
+        self.socialGraphWidget.showGrid(x=True, y=True)
+        self.socialGraphWidget.setMouseEnabled(x=True, y=True)
         
         # Add road network plot to the right column
         self.roadGraphWidget = self.win.addPlot(row=0, col=1, title=f"Road Network {suffix}")
         self.roadGraphWidget.scene().sigMouseClicked.connect(self.roadGraphClick)
-        #self.linkGraphAxis()
+        self.roadGraphWidget.setMouseEnabled(x=True, y=True)
+        
+        # Link the axes of both plots for synchronized zooming/panning
+        self.socialGraphWidget.setXLink(self.roadGraphWidget)
+        self.socialGraphWidget.setYLink(self.roadGraphWidget)
+        
+        # Ensure both plots are visible and properly sized
+        self.win.ci.layout.setSpacing(10)
+        self.socialGraphWidget.show()
+        self.roadGraphWidget.show()
 
     def roadGraphClick(self, event):
         vb = self.roadGraphWidget.vb
@@ -222,8 +235,40 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             return True
         return False
 
+    def visualize_social_network(self, community_members=None):
+        if community_members:
+            # Extract user IDs from community_members
+            community_users = []
+            for community in community_members:
+                if isinstance(community, dict) and 'users' in community:
+                    community_users.extend(community['users'])
+            all_users = set(community_users)  # Avoid duplicates
+        else:
+            # Get all users and their locations
+            all_users = self.selectedSocialNetwork.getUsers()
+
+        plotted_users = {}
+
+        # Plot user nodes
+        for user in all_users:
+            if isinstance(user, str):  # Ensure user is a valid string ID
+                try:
+                    loc = self.selectedSocialNetwork.userLoc(user)
+                    # ...existing code for plotting users...
+                except KeyError:
+                    print(f"User location not found for user ID: {user}")
+
     def __bitvectorCommunitySearch(self):
         """Open dialog for community search with bit vector optimization"""
+        # Check if networks are available first
+        if not self.selectedSocialNetwork or not self.selectedRoadNetwork:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Networks Required",
+                "Both social and road networks must be selected."
+            )
+            return
+            
         # Create dialog if it doesn't exist
         if not hasattr(self, 'bitvectorDialog') or self.__windows.get(9) is None:
             self.__windows[9] = QtWidgets.QDialog(self)
@@ -860,6 +905,9 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 # Visualize communities
                 self.visualizeCommunities(communities)
                 
+                # Visualize social network with the found communities
+                self.visualize_social_network(communities)
+                
                 # Close dialog
                 self.__windows[9].accept()
             else:
@@ -939,88 +987,257 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         top_community = communities[0]
         network = nx.Graph()
         
-        # Add center node for top community
-        network.add_node(
-            top_community['center'], 
-            physics=False, 
-            label=f"Center: {top_community['center']}", 
-            color='green', 
-            size=15, 
-            shape='star'
-        )
-        
-        # Add top community members
-        for user in top_community['users']:
-            if user != top_community['center']:
-                network.add_node(user, physics=False, label=str(user), color='blue', size=15)
-        
-        # Add connections for top community
-        for user in top_community['users']:
-            try:
-                rels = self.selectedSocialNetwork.getUserRel(user)
-                rel_users = []
-                for r in rels:
-                    rel_users.append(r[0])
+        # Create a more detailed network visualization with all communities
+        for i, community in enumerate(communities):
+            color = 'green' if i == 0 else f'rgb({50+i*30}, {50+i*20}, {150+i*10})'
+            shape = 'star' if i == 0 else 'dot'
             
-                relations = set(rel_users) & set(top_community['users'])
-                for r in relations:
-                    network.add_edge(user, r, color='black')
-            except:
-                continue
+            # Add center node with larger size and star shape
+            network.add_node(
+                community['center'], 
+                physics=True, 
+                label=f"Center {i+1}: {community['center']}", 
+                color=color, 
+                size=25, 
+                shape='star',
+                group=i,
+                title=f"Community {i+1} Center<br>Score: {community['score']:.4f}"
+            )
+            
+            # Add all community members
+            for user in community['users']:
+                if user != community['center']:
+                    # Check if node already exists (might be in multiple communities)
+                    if user in network.nodes:
+                        # Add information about being in multiple communities
+                        title = network.nodes[user].get('title', '')
+                        title += f"<br>Also in Community {i+1}"
+                        network.nodes[user]['title'] = title
+                        # Don't change the node appearance if already in the network
+                    else:
+                        network.add_node(
+                            user, 
+                            physics=True, 
+                            label=str(user), 
+                            color=color, 
+                            size=15,
+                            group=i,
+                            title=f"Member of Community {i+1}"
+                        )
+            
+            # Add connections within community
+            for user in community['users']:
+                # Get user's relationships
+                try:
+                    rels = self.selectedSocialNetwork.getUserRel(user)
+                    rel_users = []
+                    for r in rels:
+                        if r and r[0]:
+                            rel_users.append(r[0])
+                
+                    # Find relationships within the community
+                    relations = set(rel_users) & set(community['users'])
+                    for r in relations:
+                        if not network.has_edge(user, r):
+                            network.add_edge(user, r, color=color, group=i, 
+                                            title=f"Connection in Community {i+1}")
+                except Exception as e:
+                    print(f"Error processing relations for user {user}: {str(e)}")
         
-        # Create interactive visualization with better configuration
-        nt = Network('100%', '600px', notebook=False)
-        nt.from_nx(network)
+        # --------- Direct HTML visualization approach ---------
+        # Create basic HTML with a clear container for vis.js network
+        basic_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Community Network</title>
+            <style>
+                html, body {
+                    width: 100%;
+                    height: 100%;
+                    margin: 0;
+                    padding: 0;
+                    overflow: hidden;
+                    background-color: white;
+                }
+                #mynetwork {
+                    width: 100%;
+                    height: 100%;
+                    border: none;
+                    background-color: white;
+                }
+            </style>
+            <!-- Vis.js library -->
+            <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
+            <link href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css" rel="stylesheet" type="text/css" />
+            <style>
+                .network-title {
+                    position: absolute;
+                    top: 10px;
+                    left: 10px;
+                    z-index: 10;
+                    background-color: rgba(255, 255, 255, 0.8);
+                    padding: 5px 10px;
+                    border-radius: 5px;
+                    font-family: Arial, sans-serif;
+                    font-size: 14px;
+                    font-weight: bold;
+                    color: #333;
+                    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="network-title">Social Network Community Detection</div>
+            <div id="mynetwork"></div>
+            <script type="text/javascript">
+                // The network data will be inserted here
+                var nodes = new vis.DataSet(NODES_DATA);
+                var edges = new vis.DataSet(EDGES_DATA);
+                
+                // Create a network
+                var container = document.getElementById('mynetwork');
+                var data = {
+                    nodes: nodes,
+                    edges: edges
+                };
+                var options = OPTIONS_DATA;
+                var network = new vis.Network(container, data, options);
+            </script>
+        </body>
+        </html>
+        """
         
-        # Set better options for visualization
-        nt.set_options("""
-        {
+        # Get nodes and edges data as JSON
+        nodes_data = []
+        edges_data = []
+        
+        for n, attrs in network.nodes(data=True):
+            node_data = {
+                'id': str(n),
+                'label': attrs.get('label', str(n)),
+                'color': attrs.get('color', '#97c2fc'),
+                'size': attrs.get('size', 10),
+                'shape': attrs.get('shape', 'dot'),
+                'title': attrs.get('title', ''),
+                'group': attrs.get('group', 0)
+            }
+            nodes_data.append(node_data)
+        
+        for u, v, attrs in network.edges(data=True):
+            edge_data = {
+                'from': str(u),
+                'to': str(v),
+                'title': attrs.get('title', ''),
+                'color': attrs.get('color', '#848484')
+            }
+            edges_data.append(edge_data)
+        
+        # Physics options optimized for communities
+        options_data = {
             "nodes": {
-                "font": {"size": 12, "face": "Arial"},
-                "scaling": {"min": 10, "max": 30}
+                "font": {"size": 12, "face": "Arial", "color": "black"},
+                "scaling": {"min": 10, "max": 30},
+                "shadow": {"enabled": True}
             },
             "edges": {
-                "color": {"inherit": false},
-                "smooth": {"type": "continuous", "forceDirection": "none"}
+                "color": {"inherit": "from"},
+                "smooth": {"type": "continuous", "forceDirection": "none"},
+                "width": 2,
+                "shadow": {"enabled": True}
             },
             "physics": {
                 "barnesHut": {
                     "gravitationalConstant": -2000,
                     "centralGravity": 0.3,
-                    "springLength": 95,
-                    "springConstant": 0.04
+                    "springLength": 120,
+                    "springConstant": 0.05,
+                    "damping": 0.09,
+                    "avoidOverlap": 0.5
                 },
-                "minVelocity": 0.75
+                "stabilization": {
+                    "enabled": True,
+                    "iterations": 1500,
+                    "updateInterval": 25,
+                    "fit": True
+                },
+                "solver": "barnesHut",
+                "enabled": True
             },
             "interaction": {
-                "navigationButtons": true,
-                "keyboard": true
+                "navigationButtons": True,
+                "keyboard": True,
+                "hover": True,
+                "multiselect": True,
+                "dragNodes": True
+            },
+            "layout": {
+                "improvedLayout": True,
+                "hierarchical": {
+                    "enabled": False
+                }
             }
         }
-        """)
-        nt.save_graph('bitvector-community-detection.html')
         
-        # Create the web view with better handling
+        # Replace placeholders in the HTML template
+        import json
+        html_content = basic_html
+        html_content = html_content.replace('NODES_DATA', json.dumps(nodes_data))
+        html_content = html_content.replace('EDGES_DATA', json.dumps(edges_data))
+        html_content = html_content.replace('OPTIONS_DATA', json.dumps(options_data))
+        
+        # Write to a file
+        with open('direct-network-viz.html', 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        # Create a completely new QWebEngineView
         self.socialNetWidget = QWebEngineView()
+        self.socialNetWidget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.socialNetWidget.setMinimumWidth(400)
+        self.socialNetWidget.setMinimumHeight(400)
         
-        # Read the HTML content
+        # Load the HTML file directly
         try:
-            with open('bitvector-community-detection.html', 'r', encoding='utf-8') as f:
-                html = f.read()
-                # Make sure the HTML has the correct size
-                html = html.replace('<div id="mynetwork"></div>', 
-                               '<div id="mynetwork" style="width:100%;height:100%;"></div>')
-                self.socialNetWidget.setHtml(html)
+            self.socialNetWidget.load(QtCore.QUrl.fromLocalFile(os.path.abspath('direct-network-viz.html')))
         except Exception as e:
-            print(f"Error loading the network visualization: {str(e)}")
-            # Fallback to empty view
-            self.socialNetWidget.setHtml("<html><body><h2>Network visualization could not be loaded</h2></body></html>")
+            print(f"Error loading network visualization: {str(e)}")
+            # Show error message in web view
+            error_html = f"""
+            <html>
+            <body style="margin:20px;font-family:Arial,sans-serif;background:#f8f8f8;">
+                <div style="text-align:center;margin-top:50px;">
+                    <h2 style="color:#e74c3c;">Network visualization could not be loaded</h2>
+                    <p>Error: {str(e)}</p>
+                    <p>Check console for details.</p>
+                </div>
+            </body>
+            </html>
+            """
+            self.socialNetWidget.setHtml(error_html)
         
-        # Add the social network widget to the layout
-        self.layout.addWidget(self.socialNetWidget, 0, 0, 1, 1)
+        # Create a completely new widget hierarchy
+        new_view = QtWidgets.QWidget()
+        main_layout = QtWidgets.QHBoxLayout()
+        main_layout.setContentsMargins(1, 1, 1, 1)
+        main_layout.setSpacing(1)
+        new_view.setLayout(main_layout)
         
-        # Schedule a reload after a short delay to ensure proper rendering
-        QTimer.singleShot(500, self.socialNetWidget.reload)
+        # Left panel (community list) - Made wider
+        left_panel = QtWidgets.QWidget()
+        left_panel.setMinimumWidth(350)  # Increased from 250
+        left_panel.setMaximumWidth(400)  # Increased from 300
+        left_panel.setStyleSheet("background-color: #2D2D2D; color: white;")
+        left_layout = QtWidgets.QVBoxLayout()
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        left_panel.setLayout(left_layout)
+        
+        # Add title to the left panel
+        title_label = QtWidgets.QLabel("Ranked Communities")
+        title_label.setStyleSheet("font-size: 16pt; font-weight: bold; padding: 10px; border-bottom: 1px solid #444;")
+        title_label.setAlignment(QtCore.Qt.AlignCenter)
+        left_layout.addWidget(title_label)
         
         # Create ranked communities table for left panel
         communities_table = QtWidgets.QTableWidget()
@@ -1077,43 +1294,21 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         communities_table.resizeColumnsToContents()
         
-        # Create a new widget before setting up layouts
-        self.view = QtWidgets.QWidget()
-        self.view.setContentsMargins(0, 0, 0, 0)
-        
-        # Create a main layout with no spacing
-        main_layout = QtWidgets.QHBoxLayout(self.view)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
-        # Left panel (community list) - Made wider
-        left_panel = QtWidgets.QWidget()
-        left_panel.setMinimumWidth(350)  # Increased from 250
-        left_panel.setMaximumWidth(400)  # Increased from 300
-        left_panel.setStyleSheet("background-color: #2D2D2D; color: white;")
-        left_layout = QtWidgets.QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
-        
-        # Add title to the left panel
-        title_label = QtWidgets.QLabel("Ranked Communities")
-        title_label.setStyleSheet("font-size: 16pt; font-weight: bold; padding: 10px; border-bottom: 1px solid #444;")
-        title_label.setAlignment(QtCore.Qt.AlignCenter)
-        left_layout.addWidget(title_label)
-        
         # Add table to the left panel (set to expand vertically to fill all space)
         left_layout.addWidget(communities_table, 1)  # 1 means stretch factor, makes it expand to fill space
         
         # Right section (contains map, social network, and score)
         right_panel = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout = QtWidgets.QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
+        right_panel.setLayout(right_layout)
         
         # Create a custom toolbar widget and add it to the top of the view
         toolbar_widget = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar_widget)
+        toolbar_layout = QtWidgets.QHBoxLayout()
         toolbar_layout.setContentsMargins(2, 2, 2, 2)
+        toolbar_widget.setLayout(toolbar_layout)
         
         # Add back button
         back_btn = QtWidgets.QPushButton("Back")
@@ -1128,15 +1323,28 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         # Create a widget for the visualizations
         viz_widget = QtWidgets.QWidget()
-        viz_layout = QtWidgets.QHBoxLayout(viz_widget)
+        viz_layout = QtWidgets.QHBoxLayout()
         viz_layout.setContentsMargins(0, 0, 0, 0)
         viz_layout.setSpacing(0)
+        viz_widget.setLayout(viz_layout)
+        
+        # Create a frame for the social network visualization to ensure proper display
+        social_frame = QtWidgets.QFrame()
+        social_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        social_frame.setLineWidth(1)
+        social_frame.setMinimumWidth(400)
+        social_layout = QtWidgets.QVBoxLayout()
+        social_layout.setContentsMargins(0, 0, 0, 0)
+        social_frame.setLayout(social_layout)
+        
+        # Add the WebEngineView to show the social network
+        social_layout.addWidget(self.socialNetWidget)
         
         # Add social network visualization to the left side
-        viz_layout.addWidget(self.socialNetWidget)
+        viz_layout.addWidget(social_frame, 1)
         
         # Add road map to the right side
-        viz_layout.addWidget(self.win)
+        viz_layout.addWidget(self.win, 1)
         
         # Add the visualization widget to the right panel
         right_layout.addWidget(viz_widget, 3)  # Top section takes 3/4 of height
@@ -1144,8 +1352,9 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         # Add score information
         score_widget = QtWidgets.QWidget()
         score_widget.setStyleSheet("background-color: #2D2D2D; color: white;")
-        score_layout = QtWidgets.QVBoxLayout(score_widget)
+        score_layout = QtWidgets.QVBoxLayout()
         score_layout.setContentsMargins(10, 10, 10, 10)
+        score_widget.setLayout(score_layout)
         
         # Title
         score_title = QtWidgets.QLabel("Community Score")
@@ -1228,7 +1437,10 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         main_layout.addWidget(right_panel, 1)  # Give right section priority to expand
         
         # Set central widget
-        self.setCentralWidget(self.view)
+        self.setCentralWidget(new_view)
+        
+        # Save reference to the view
+        self.view = new_view
         
         # Hide timeline
         self.timeline.hide()
@@ -1237,55 +1449,136 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         """Switch visualization to show the selected community"""
         if not self.current_communities or community_idx >= len(self.current_communities):
             return
-    
+
         # Get the selected community
         community = self.current_communities[community_idx]
-    
+
         # Create network graph for visualization
         network = nx.Graph()
-    
+
         # Add center node
         network.add_node(
             community['center'], 
-            physics=False, 
+            physics=True, 
             label=f"Center: {community['center']}", 
             color='green', 
-            size=15, 
+            size=25, 
             shape='star'
         )
-    
+
         # Add community members
         for user in community['users']:
             if user != community['center']:
-                network.add_node(user, physics=False, label=str(user), color='blue', size=15)
-    
+                network.add_node(user, physics=True, label=str(user), color='blue', size=15)
+
         # Add connections
         for user in community['users']:
             try:
                 rels = self.selectedSocialNetwork.getUserRel(user)
                 rel_users = []
                 for r in rels:
-                    rel_users.append(r[0])
+                    if r:
+                        rel_users.append(r[0])
             
                 relations = set(rel_users) & set(community['users'])
                 for r in relations:
                     network.add_edge(user, r, color='black')
             except:
                 continue
-    
-        # Create interactive visualization with better configuration
-        nt = Network('100%', '600px', notebook=False)
-        nt.from_nx(network)
-    
-        # Set better options for visualization
-        nt.set_options("""
-        {
+
+        # Direct HTML visualization approach
+        # Create basic HTML with a clear container for vis.js network
+        basic_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Community Network</title>
+            <style>
+                html, body {
+                    width: 100%;
+                    height: 100%;
+                    margin: 0;
+                    padding: 0;
+                    overflow: hidden;
+                    background-color: white;
+                }
+                #mynetwork {
+                    width: 100%;
+                    height: 100%;
+                    border: none;
+                    background-color: white;
+                }
+                .network-title {
+                    position: absolute;
+                    top: 5px;
+                    left: 0;
+                    right: 0;
+                    text-align: center;
+                    z-index: 10;
+                    font-family: Arial, sans-serif;
+                    font-size: 12px;
+                    font-weight: normal;
+                    color: #000;
+                }
+            </style>
+            <!-- Vis.js library -->
+            <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js"></script>
+            <link href="https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.css" rel="stylesheet" type="text/css" />
+        </head>
+        <body>
+            <div class="network-title">Social Network Community Detection</div>
+            <div id="mynetwork"></div>
+            <script type="text/javascript">
+                // The network data will be inserted here
+                var nodes = new vis.DataSet(NODES_DATA);
+                var edges = new vis.DataSet(EDGES_DATA);
+                
+                // Create a network
+                var container = document.getElementById('mynetwork');
+                var data = {
+                    nodes: nodes,
+                    edges: edges
+                };
+                var options = OPTIONS_DATA;
+                var network = new vis.Network(container, data, options);
+            </script>
+        </body>
+        </html>
+        """
+        
+        # Get nodes and edges data as JSON
+        nodes_data = []
+        edges_data = []
+        
+        for n, attrs in network.nodes(data=True):
+            node_data = {
+                'id': str(n),
+                'label': attrs.get('label', str(n)),
+                'color': attrs.get('color', '#97c2fc'),
+                'size': attrs.get('size', 10),
+                'shape': attrs.get('shape', 'dot'),
+                'title': attrs.get('title', '')
+            }
+            nodes_data.append(node_data)
+        
+        for u, v, attrs in network.edges(data=True):
+            edge_data = {
+                'from': str(u),
+                'to': str(v),
+                'title': attrs.get('title', ''),
+                'color': attrs.get('color', '#848484')
+            }
+            edges_data.append(edge_data)
+        
+        # Physics options optimized for communities
+        options_data = {
             "nodes": {
-                "font": {"size": 12, "face": "Arial"},
+                "font": {"size": 12, "face": "Arial", "color": "black"},
                 "scaling": {"min": 10, "max": 30}
             },
             "edges": {
-                "color": {"inherit": false},
+                "color": {"inherit": False},
                 "smooth": {"type": "continuous", "forceDirection": "none"}
             },
             "physics": {
@@ -1293,60 +1586,80 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                     "gravitationalConstant": -2000,
                     "centralGravity": 0.3,
                     "springLength": 95,
-                    "springConstant": 0.04
+                    "springConstant": 0.04,
+                    "avoidOverlap": 0.5
+                },
+                "stabilization": {
+                    "enabled": True,
+                    "iterations": 1000,
+                    "fit": True
                 },
                 "minVelocity": 0.75
             },
             "interaction": {
-                "navigationButtons": true,
-                "keyboard": true
+                "navigationButtons": True,
+                "keyboard": True,
+                "dragNodes": True
             }
         }
-        """)
-        nt.save_graph('bitvector-community-detection.html')
-    
-        # Update web view
+        
+        # Replace placeholders in the HTML template
+        import json
+        html_content = basic_html
+        html_content = html_content.replace('NODES_DATA', json.dumps(nodes_data))
+        html_content = html_content.replace('EDGES_DATA', json.dumps(edges_data))
+        html_content = html_content.replace('OPTIONS_DATA', json.dumps(options_data))
+        
+        # Write to a file
+        with open('direct-community-view.html', 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        # Load the HTML file directly
         try:
-            with open('bitvector-community-detection.html', 'r', encoding='utf-8') as f:
-                html = f.read()
-                # Make sure the HTML has the correct size
-                html = html.replace('<div id="mynetwork"></div>', 
-                                '<div id="mynetwork" style="width:100%;height:100%;"></div>')
-                self.socialNetWidget.setHtml(html)
-            
-            # Schedule a reload after a short delay to ensure proper rendering
-            QTimer.singleShot(500, self.socialNetWidget.reload)
+            self.socialNetWidget.load(QtCore.QUrl.fromLocalFile(os.path.abspath('direct-community-view.html')))
         except Exception as e:
             print(f"Error updating network visualization: {str(e)}")
-    
+            # Show error message in web view
+            error_html = f"""
+            <html>
+            <body style="margin:20px;font-family:Arial,sans-serif;background:#f8f8f8;">
+                <div style="text-align:center;margin-top:50px;">
+                    <h2 style="color:#e74c3c;">Network visualization could not be loaded</h2>
+                    <p>Error: {str(e)}</p>
+                </div>
+            </body>
+            </html>
+            """
+            self.socialNetWidget.setHtml(error_html)
+
         # Find score widget and update labels with current weights
         for widget in self.findChildren(QtWidgets.QLabel):
             if widget.text().startswith("Overall Score:"):
                 widget.setText(f"Overall Score: {community['score']:.4f}")
             elif widget.text().startswith("Size:"):
                 widget.setText(f"Size: {community['size']} users\nCenter: {community['center']}")
-            elif widget.text().startswith("Keywords"):
+            elif widget.text().startswith("Keywords ("):
                 widget.setText(f"Keywords ({self.current_scoring_weights['keyword']*100:.0f}%):")
-            elif widget.text().startswith("Distance"):
+            elif widget.text().startswith("Distance ("):
                 widget.setText(f"Distance ({self.current_scoring_weights['distance']*100:.0f}%):")
-            elif widget.text().startswith("Connections"):
+            elif widget.text().startswith("Connections ("):
                 widget.setText(f"Connections ({self.current_scoring_weights['connection']*100:.0f}%):")
-    
+
         # Update progress bars
         keywords_bar = self.findChild(QtWidgets.QProgressBar, "keywords_bar")
         if keywords_bar:
             keywords_bar.setValue(int(community['components']['keywords'] * 100))
-            keywords_bar.setFormat(f"{community['components']['keywords']:.2f}")
+            keywords_bar.setFormat(f"{community['components']['keywords']*100:.1f}%")
         
         distance_bar = self.findChild(QtWidgets.QProgressBar, "distance_bar")
         if distance_bar:
             distance_bar.setValue(int(community['components']['distance'] * 100))
-            distance_bar.setFormat(f"{community['components']['distance']:.2f}")
+            distance_bar.setFormat(f"{community['components']['distance']*100:.1f}%")
         
         connections_bar = self.findChild(QtWidgets.QProgressBar, "connections_bar")
         if connections_bar:
             connections_bar.setValue(int(community['components']['connections'] * 100))
-            connections_bar.setFormat(f"{community['components']['connections']:.2f}")
+            connections_bar.setFormat(f"{community['components']['connections']*100:.1f}%")
 
     def __keywordCommunity(self):
         self.queryInput.community()
@@ -2110,8 +2423,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             self.selectedRoadNetwork.visualize(self.roadGraphWidget)
             # If social network is selected, display clusters
         if self.selectedSocialNetwork is not None:
-           self.ids, self.centers, sizes, relations, popSize = self.selectedSocialNetwork.getSummaryClusters(
-                self.toolbar.clusterInput.textBox.text())
+           self.ids, self.centers, sizes, relations, popSize = self.toolbar.clusterInput.textBox.text()
            self.visualizeSummaryData(self.ids, self.centers, sizes, relations, popSize)
            with open('nx.html', 'r') as f:
                 html = f.read()
