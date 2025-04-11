@@ -116,7 +116,6 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         
         # Initialize community detector
         self.communityDetector = None
-        self.precomputed = False
         
         # Initialize community bridge for original functionality
         self.community_bridge = CommunityBridge(self)
@@ -268,6 +267,9 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                 "Both social and road networks must be selected."
             )
             return
+            
+        # Initialize community detector automatically
+        self.initializeCommunityDetector()
             
         # Create dialog if it doesn't exist
         if not hasattr(self, 'bitvectorDialog') or self.__windows.get(9) is None:
@@ -451,15 +453,7 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
             optimization_header.setStyleSheet("font-weight: bold; margin-top: 10px;")
             form.addRow(optimization_header)
             
-            # Precomputation
-            precompFrame = QtWidgets.QHBoxLayout()
-            self.__windows[9].precompCheck = QtWidgets.QCheckBox("Use Precomputation")
-            self.__windows[9].precompCheck.setChecked(self.precomputed)
-            self.__windows[9].precompBtn = QtWidgets.QPushButton("Precompute Now")
-            self.__windows[9].precompBtn.clicked.connect(self.precomputeSubgraphs)
-            precompFrame.addWidget(self.__windows[9].precompCheck)
-            precompFrame.addWidget(self.__windows[9].precompBtn)
-            form.addRow("Precomputation:", precompFrame)
+            # Precomputation is now handled automatically in the background
             
             # BitVector Tree optimization
             self.__windows[9].treeOptCheck = QtWidgets.QCheckBox("Use BitVector Tree")
@@ -508,9 +502,6 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
                     # Disable user mode if no user is selected
                     self.__windows[9].userModeRadio.setEnabled(False)
                     self.__windows[9].keywordModeRadio.setChecked(True)
-        
-        # Update precomputation checkbox state
-        self.__windows[9].precompCheck.setChecked(self.precomputed)
         
         # Check if networks are available
         if not self.selectedSocialNetwork or not self.selectedRoadNetwork:
@@ -843,8 +834,10 @@ class Gui(QtWidgets.QMainWindow, TreeMixin):
         top_k = self.__windows[9].topKInput.value()
         radius = int(self.__windows[9].radiusCombo.currentText())
         min_similarity = self.__windows[9].minSimInput.value()
-        use_precomputation = self.__windows[9].precompCheck.isChecked() and self.precomputed
         use_tree_optimization = self.__windows[9].treeOptCheck.isChecked()
+        
+        # Always use precomputation if available
+        use_precomputation = True
         
         # Get scoring weights
         keyword_weight = self.__windows[9].keywordWeightSlider.value() / 100
